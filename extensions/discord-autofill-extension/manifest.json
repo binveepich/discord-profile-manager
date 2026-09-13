@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Discord Autofill",
+  "version": "2.0",
+  "description": "Autofill Discord login and 2FA code",
+
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwvYlrnfWe1HlNrS70bK7ICHtp2qetlWNZttcsNfhzf/kvebRFV89uZqMnRDEPDmkq8jNvvWFDvuaQbWaheEV4/yMc4Z1RBgfuw37cQRp24yHU44gBj4ScMAeyt2CIq/WyxTRFvHQrXna4LvSDU12/6GDwa4eF6TPQRpX0g25bq3ek28VaCMy3Ia65SiVhLMcVIJgCad6l/qWKMG7ZlqCCWAt+RQMGKpjiB2BRjqkZjqXh/dOAWP07WgbWWpc4mS2d4WGpG74UE51EEwxid5ZqZ/gJYtupj7EBzcF2+bxUPBqNCIxWmldpGl/ZHoJP43cdRBVfxRXtArozloqK/cZmwIDAQAB",
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://discord.com/*"],
+      "host_permissions": ["https://discord.com/*"],
+      "js": ["config.js", "totp.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

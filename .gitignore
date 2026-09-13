@@ -1,0 +1,46 @@
+# Python caches and virtual environments
+__pycache__/
+**/__pycache__/
+**pycache**/
+*.pyc
+*.pyo
+/.venv/
+/venv/
+
+# IDE
+/.vscode/
+/.idea/
+
+# Local browser runtime (including Chromium binaries)
+/browser/
+
+# User profiles, sessions, and local application data
+/profiles/
+/data/
+
+# Logs
+/logs/
+/log/
+*.log
+
+# Credentials and account data
+/config/accounts/
+*.secret
+*.secrets
+
+# Unsafe local-only extension component; do not publish token extraction code.
+/extensions/discord-token-extractor-extension/
+
+# Temporary files
+/tmp/
+/temp/
+*.tmp
+
+# Windows metadata
+Thumbs.db
+Desktop.ini
+
+# Generated build outputs and binaries
+/build/
+/dist/
+*.exe
