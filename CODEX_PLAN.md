@@ -134,7 +134,7 @@ Not allowed:
 
 ## M9 — Source app stability
 
-Status: TODO
+Status: COMPLETE
 
 ### Objective
 
@@ -160,13 +160,13 @@ if __name__ == "__main__":
 
 ### Acceptance criteria
 
-- [ ] Root-level `main.py` exists, or an equivalent clear source entry is documented.
-- [ ] `python -B main.py` launches the same application behavior.
-- [ ] `python -B .\legacy\profile_manager.py` remains compatible.
-- [ ] README documents the preferred source-run command.
-- [ ] No broad refactor is performed.
-- [ ] Full unit test suite passes.
-- [ ] M9 is committed separately.
+- [x] Root-level `main.py` exists, or an equivalent clear source entry is documented.
+- [x] `python -B main.py` delegates to the same application behavior.
+- [x] `python -B .\legacy\profile_manager.py` remains compatible.
+- [x] README documents the preferred source-run command.
+- [x] No broad refactor is performed.
+- [x] Full unit test suite passes (170 tests).
+- [x] M9 is committed separately.
 
 ---
 

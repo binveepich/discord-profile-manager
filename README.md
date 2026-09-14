@@ -10,18 +10,32 @@ Use Python with Tkinter and the existing `psutil` dependency. The M1 tests were 
 with Python 3.11.8 and psutil 7.2.2 on Windows. If psutil is missing, install it in
 your chosen Python environment with `python -m pip install psutil`.
 
-From PowerShell:
+Preferred source entrypoint from PowerShell:
 
 ```powershell
 Set-Location -LiteralPath 'I:\Discord_Profile_Manager'
+python -B main.py
+```
+
+The legacy command remains compatible:
+
+```powershell
 python -B .\legacy\profile_manager.py
 ```
 
-The script resolves browser and extension source paths relative to the project
-root, independent of the working directory. If `browser/chrome.exe` is missing
+`main.py` is a thin wrapper; the current implementation remains in
+`legacy/profile_manager.py`. The implementation resolves browser and extension
+source paths relative to the project root, independent of the working directory.
+If `browser/chrome.exe` is missing
 or is a directory instead of a file, startup displays the expected full path and
 returns after the error dialog is dismissed. A missing runtime encountered when
 opening a profile uses the existing GUI error dialog.
+
+## Packaging status
+
+Packaging is not active yet. The application is currently intended to be run and
+reviewed from source. Do not create an `.exe`, installer, portable release, or
+GitHub release artifact until the user explicitly approves the source-code version.
 
 ## M1-M8 storage and launch compatibility
 
@@ -155,8 +169,9 @@ do not open Chromium or access production account data. They cover startup,
 launch errors, Windows argument parsing, isolated launch paths, extension
 arguments, existing Local State preservation, profile operations, account
 import/storage, lifecycle failures, process detection, multi-profile opening,
-copy-only legacy-to-`profiles/` migration safeguards, and application-owned
-metadata recovery/atomic-write safeguards.
+copy-only legacy-to-`profiles/` migration safeguards, application-owned
+metadata recovery/atomic-write safeguards, environment presets, and optional
+proxy behavior.
 
 An additional opt-in test launches the real runtime in headless mode against a
 loopback HTTP fixture, using only disposable workspace profiles:

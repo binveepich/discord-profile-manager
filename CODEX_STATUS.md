@@ -57,16 +57,16 @@ Required before completion:
 
 ### M9 — Source app stability
 
-Status: TODO
+Status: COMPLETE
 
 Required before completion:
 
-- [ ] root-level source entrypoint created or confirmed
-- [ ] `python -B main.py` works
-- [ ] legacy command remains compatible
-- [ ] README updated
-- [ ] full unit suite PASS
-- [ ] commit created
+- [x] root-level source entrypoint created or confirmed
+- [x] `python -B main.py` delegates to the existing implementation
+- [x] legacy command remains compatible
+- [x] README updated
+- [x] full unit suite PASS (170 tests)
+- [x] commit created
 
 ### M10 — Verification workflow
 
