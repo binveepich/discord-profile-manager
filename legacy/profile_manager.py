@@ -25,6 +25,7 @@ import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import PureWindowsPath
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # ----------------------------------------------------------------------
 # Configuration and Paths
@@ -48,7 +49,28 @@ LOCAL_STATE = DATA_DIR / "Local State"
 NEW_PROFILE_PATTERN = re.compile(r"^profile_(\d+)$", re.IGNORECASE)
 MANAGER_PATH_KEY = "manager_path"
 METADATA_VERSION = 1
+# ``default`` is retained in metadata as the M1-M6 desktop-compatible value.
+# New explicit selections use the normalized preset names below.
 DEFAULT_ENVIRONMENT_PRESET = "default"
+ENVIRONMENT_DESKTOP = "desktop"
+ENVIRONMENT_MOBILE = "mobile"
+ENVIRONMENT_CUSTOM = "custom"
+SUPPORTED_ENVIRONMENT_PRESETS = (
+    ENVIRONMENT_DESKTOP,
+    ENVIRONMENT_MOBILE,
+    ENVIRONMENT_CUSTOM,
+)
+MOBILE_ENVIRONMENT_DEFAULTS = {
+    "viewport_width": 390,
+    "viewport_height": 844,
+    "device_scale_factor": 2.0,
+    "language": "en-US",
+    "mobile_mode": True,
+    "touch_mode": True,
+}
+LOCALE_PATTERN = re.compile(
+    r"^[A-Za-z]{2,3}(?:[-_](?:[A-Za-z]{4}|[A-Za-z]{2}|\d{3}|[A-Za-z0-9]{2,8}))*$"
+)
 PROFILE_TABLE_COLUMNS = (
     "name", "account", "environment", "proxy", "status", "last_opened"
 )
@@ -361,6 +383,223 @@ def timestamp_from_epoch(value):
         return utc_timestamp()
 
 
+def normalize_environment_preset(value):
+    """Return a supported preset name, safely falling back to Desktop."""
+    if not isinstance(value, str):
+        return ENVIRONMENT_DESKTOP
+    normalized = value.strip().casefold().replace("_", "-")
+    if normalized in (DEFAULT_ENVIRONMENT_PRESET, ENVIRONMENT_DESKTOP):
+        return ENVIRONMENT_DESKTOP
+    if normalized == ENVIRONMENT_MOBILE:
+        return ENVIRONMENT_MOBILE
+    if normalized == ENVIRONMENT_CUSTOM:
+        return ENVIRONMENT_CUSTOM
+    return ENVIRONMENT_DESKTOP
+
+
+def normalize_locale(value):
+    """Return a safe Chromium locale or None for invalid input."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().replace("_", "-")
+    if not candidate or not LOCALE_PATTERN.fullmatch(candidate):
+        return None
+    parts = candidate.split("-")
+    language = parts[0].lower()
+    normalized = [language]
+    for part in parts[1:]:
+        if len(part) == 4 and part.isalpha():
+            normalized.append(part.title())
+        elif len(part) == 2 and part.isalpha():
+            normalized.append(part.upper())
+        else:
+            normalized.append(part)
+    return "-".join(normalized)
+
+
+def normalize_timezone(value):
+    """Return a valid IANA timezone identifier or None.
+
+    Timezones are deliberately validated and persisted separately from launch
+    arguments. Chromium has no reliable standalone timezone command-line
+    switch, and this application does not currently maintain a CDP session.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or candidate.startswith("-") or "\\" in candidate:
+        return None
+    try:
+        ZoneInfo(candidate)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+    return candidate
+
+
+def normalize_viewport_dimension(value, minimum, maximum):
+    """Return an integer viewport dimension inside a safe range or None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and re.fullmatch(r"[+]?[0-9]+", value.strip()):
+        try:
+            number = int(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if minimum <= number <= maximum else None
+
+
+def normalize_scale_factor(value):
+    """Return a safe device scale factor or None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or not 0.5 <= number <= 4.0:
+        return None
+    return round(number, 2)
+
+
+def normalize_environment_config(config):
+    """Sanitize supported custom fields without allowing launch injection."""
+    if not isinstance(config, dict):
+        return None
+
+    def first_value(*names):
+        for name in names:
+            if name in config:
+                return config[name]
+        return None
+
+    normalized = {}
+    width = normalize_viewport_dimension(
+        first_value("viewport_width", "width"), 320, 7680
+    )
+    height = normalize_viewport_dimension(
+        first_value("viewport_height", "height"), 240, 4320
+    )
+    scale = normalize_scale_factor(
+        first_value("device_scale_factor", "scale_factor")
+    )
+    language = normalize_locale(first_value("language", "locale"))
+    timezone_name = normalize_timezone(first_value("timezone",))
+
+    if width is not None:
+        normalized["viewport_width"] = width
+    if height is not None:
+        normalized["viewport_height"] = height
+    if scale is not None:
+        normalized["device_scale_factor"] = scale
+    if language is not None:
+        normalized["language"] = language
+    if timezone_name is not None:
+        normalized["timezone"] = timezone_name
+
+    for canonical, aliases in {
+        "mobile_mode": ("mobile_mode", "mobile"),
+        "touch_mode": ("touch_mode", "touch"),
+    }.items():
+        value = first_value(*aliases)
+        if isinstance(value, bool):
+            normalized[canonical] = value
+
+    return normalized
+
+
+def effective_environment(record):
+    """Return a normalized, non-mutating environment for one metadata record."""
+    record = record if isinstance(record, dict) else {}
+    preset = normalize_environment_preset(record.get("environment_preset"))
+    raw_config = record.get("environment_config")
+
+    if preset == ENVIRONMENT_DESKTOP:
+        return preset, {}
+    if preset == ENVIRONMENT_MOBILE:
+        config = dict(MOBILE_ENVIRONMENT_DEFAULTS)
+        custom = normalize_environment_config(raw_config)
+        if custom:
+            for key in ("viewport_width", "viewport_height", "device_scale_factor", "language"):
+                if key in custom:
+                    config[key] = custom[key]
+            if "timezone" in custom:
+                config["timezone"] = custom["timezone"]
+        # A Mobile preset always keeps these generic mobile capabilities on.
+        config["mobile_mode"] = True
+        config["touch_mode"] = True
+        return preset, config
+
+    config = normalize_environment_config(raw_config)
+    if not config:
+        return ENVIRONMENT_DESKTOP, {}
+    return preset, config
+
+
+def environment_editor_state(preset, custom_config=None):
+    """Return display values and editability for the environment dialog."""
+    normalized_preset = normalize_environment_preset(preset)
+    if normalized_preset == ENVIRONMENT_DESKTOP:
+        return {
+            "preset": ENVIRONMENT_DESKTOP,
+            "viewport_width": "Chromium default",
+            "viewport_height": "Chromium default",
+            "device_scale_factor": "Chromium default",
+            "language": "System / Chromium default",
+            "timezone": "System default",
+            "mobile_mode": False,
+            "touch_mode": False,
+            "editable": False,
+        }
+    if normalized_preset == ENVIRONMENT_MOBILE:
+        return {
+            "preset": ENVIRONMENT_MOBILE,
+            **dict(MOBILE_ENVIRONMENT_DEFAULTS),
+            "timezone": "System default",
+            "editable": False,
+        }
+
+    config = normalize_environment_config(custom_config) or {}
+    return {
+        "preset": ENVIRONMENT_CUSTOM,
+        "viewport_width": config.get("viewport_width", ""),
+        "viewport_height": config.get("viewport_height", ""),
+        "device_scale_factor": config.get("device_scale_factor", ""),
+        "language": config.get("language", ""),
+        "timezone": config.get("timezone", ""),
+        "mobile_mode": bool(config.get("mobile_mode", False)),
+        "touch_mode": bool(config.get("touch_mode", False)),
+        "editable": True,
+    }
+
+
+def environment_launch_arguments(record):
+    """Build safe Chromium switches for one profile's environment."""
+    _, config = effective_environment(record)
+    arguments = []
+    width = config.get("viewport_width")
+    height = config.get("viewport_height")
+    if width is not None and height is not None:
+        arguments.append(f"--window-size={width},{height}")
+    if "device_scale_factor" in config:
+        arguments.append(f"--force-device-scale-factor={config['device_scale_factor']:g}")
+    if config.get("language"):
+        arguments.append(f"--lang={config['language']}")
+    if config.get("mobile_mode"):
+        # Generic Chromium mobile user-agent mode; this is not a branded-device
+        # identity and does not attempt fingerprint spoofing.
+        arguments.append("--use-mobile-user-agent")
+    if "touch_mode" in config:
+        arguments.append(
+            "--touch-events=enabled" if config["touch_mode"]
+            else "--touch-events=disabled"
+        )
+    return arguments
+
+
 def metadata_path_for_profile(path):
     """Serialize a profile path relative to one of the two allowed profile roots."""
     path = Path(path).absolute()
@@ -445,7 +684,7 @@ class ProfileMetadataManager:
         seen_directories = set()
         required = {
             'profile_id', 'display_name', 'profile_directory', 'created_at',
-            'last_opened_at', 'environment_preset', 'proxy_enabled'
+            'last_opened_at', 'proxy_enabled'
         }
         for record in records:
             if not isinstance(record, dict):
@@ -466,8 +705,10 @@ class ProfileMetadataManager:
             seen_directories.add(directory_key)
             cls._validate_timestamp(record['created_at'], required=True)
             cls._validate_timestamp(record['last_opened_at'])
-            if not isinstance(record['environment_preset'], str) or not record['environment_preset'].strip():
-                raise ValueError("Invalid environment preset")
+            # Environment metadata is non-critical launch configuration. Keep
+            # malformed values loadable so the launcher can fall back to a
+            # normal Desktop session instead of locking the user out of a
+            # profile. Sensitive field names are still rejected above.
             if not isinstance(record['proxy_enabled'], bool):
                 raise ValueError("Invalid proxy_enabled value")
         return data
@@ -750,6 +991,60 @@ class ProfileManager:
     def get_profile_metadata(self):
         """Return application metadata records without exposing mutable storage."""
         return [dict(record) for record in self._load_catalog()['profiles']]
+
+    def get_environment(self, profile_id):
+        """Return one profile's effective, normalized environment settings."""
+        profile_id = validate_profile_id(profile_id)
+        record = self._record_map(self._load_catalog()).get(profile_id)
+        if record is None:
+            raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+        preset, config = effective_environment(record)
+        return {
+            "preset": preset,
+            "environment_preset": preset,
+            **dict(config),
+        }
+
+    def set_environment(self, profile_id, preset, config=None):
+        """Persist a safe environment selection for one profile.
+
+        Unknown presets and malformed optional values are normalized to safe
+        Desktop-compatible behavior. The caller can therefore never make a
+        profile unlaunchable by entering a bad environment value.
+        """
+        profile_id = validate_profile_id(profile_id)
+        normalized_preset = normalize_environment_preset(preset)
+        normalized_config = normalize_environment_config(config)
+        with self.local_state.operation():
+            self._check_registry_idle()
+            self.require_profile_dir(profile_id)
+            catalog = self._load_catalog()
+            record = self._record_map(catalog).get(profile_id)
+            if record is None:
+                raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+            record["environment_preset"] = normalized_preset
+            record.pop("environment_config", None)
+            if normalized_preset == ENVIRONMENT_CUSTOM:
+                record["environment_config"] = normalized_config or {}
+            elif normalized_preset == ENVIRONMENT_MOBILE and normalized_config:
+                # Mobile keeps generic mobile capabilities fixed, but allows
+                # safe language/viewport/scale/timezone overrides if supplied
+                # by a non-GUI caller.
+                mobile_config = {
+                    key: normalized_config[key]
+                    for key in (
+                        "viewport_width", "viewport_height", "device_scale_factor",
+                        "language", "timezone"
+                    ) if key in normalized_config
+                }
+                if mobile_config:
+                    record["environment_config"] = mobile_config
+            self._save_catalog(catalog)
+        return self.get_environment(profile_id)
+
+    # Explicit aliases make the M7 API readable to callers that think in
+    # terms of a preset rather than a complete environment object.
+    set_environment_preset = set_environment
 
     def _legacy_info_for_record(self, record, existing=None):
         info = dict(existing or {})
@@ -1620,6 +1915,11 @@ class ChromiumLauncher:
     def __init__(self):
         self.launcher_path = BROWSER_EXE
         self._processes = {}
+
+    @staticmethod
+    def build_environment_arguments(record):
+        """Expose centralized environment switch generation for tests/callers."""
+        return environment_launch_arguments(record)
         
     def launch_discord(self, profile_id, extension_paths=None):
         """Launch Discord with specified profile and multiple extensions"""
@@ -1633,6 +1933,7 @@ class ChromiumLauncher:
             profiles._check_registry_idle()
             catalog = profiles._load_catalog()
             profile_data_dir = profiles.require_profile_dir(profile_id)
+            profile_record = profiles._record_map(catalog).get(profile_id, {})
             previous = self._processes.get(profile_id)
             if (previous is not None and previous.poll() is None) or browser_using_directory(profile_data_dir):
                 return False
@@ -1646,8 +1947,9 @@ class ChromiumLauncher:
                 "--no-default-browser-check",
                 "--disable-sync",
                 "--process-per-site",
-                "https://discord.com/app"
             ]
+            cmd.extend(self.build_environment_arguments(profile_record))
+            cmd.append("https://discord.com/app")
 
             if extension_paths:
                 valid_paths = [str(checked_path(p, profile_data_dir)) for p in extension_paths if p and p.exists()]
@@ -1824,9 +2126,53 @@ class ProfileManagerApp:
         style.configure("Treeview.Heading", font=('Helvetica', 10, 'bold'))
         
         # ----- RIGHT SIDE -----
-        right_frame = tk.Frame(main_frame, bg='#f0f0f0', width=200)
-        right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
-        right_frame.pack_propagate(False)
+        # Keep the action panel bounded to the window height. Its own canvas
+        # scrolls when Windows display scaling or a short window makes all
+        # action groups taller than the available space.
+        sidebar_outer = tk.Frame(main_frame, bg='#f0f0f0', width=220)
+        sidebar_outer.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
+        sidebar_outer.pack_propagate(False)
+
+        sidebar_canvas = tk.Canvas(
+            sidebar_outer,
+            bg='#f0f0f0',
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        sidebar_scrollbar = tk.Scrollbar(
+            sidebar_outer,
+            orient=tk.VERTICAL,
+            command=sidebar_canvas.yview,
+        )
+        sidebar_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        sidebar_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sidebar_canvas.configure(yscrollcommand=sidebar_scrollbar.set)
+
+        right_frame = tk.Frame(sidebar_canvas, bg='#f0f0f0', width=200)
+        sidebar_window = sidebar_canvas.create_window(
+            (0, 0), window=right_frame, anchor='nw'
+        )
+        sidebar_canvas.bind(
+            '<Configure>',
+            lambda event: sidebar_canvas.itemconfigure(
+                sidebar_window, width=event.width
+            ),
+        )
+        right_frame.bind(
+            '<Configure>',
+            lambda _event: sidebar_canvas.configure(
+                scrollregion=sidebar_canvas.bbox('all')
+            ),
+        )
+        self.sidebar_canvas = sidebar_canvas
+        self.sidebar_outer = sidebar_outer
+        self.root.bind_all('<MouseWheel>', self._on_sidebar_mousewheel, add='+')
+        self.root.bind_all(
+            '<Button-4>', lambda event: self._scroll_sidebar_by(event, -1), add='+'
+        )
+        self.root.bind_all(
+            '<Button-5>', lambda event: self._scroll_sidebar_by(event, 1), add='+'
+        )
         
         btn_style = {
             'font': ('Helvetica', 9, 'bold'),
@@ -1903,6 +2249,29 @@ class ProfileManagerApp:
             if attribute:
                 setattr(self, attribute, button)
 
+        # ===== ENVIRONMENT =====
+        environment_frame = tk.LabelFrame(
+            right_frame,
+            text="Environment",
+            bg='#f0f0f0',
+            font=('Helvetica', 9, 'bold'),
+            padx=5,
+            pady=5
+        )
+        environment_frame.pack(fill=tk.X, pady=(0, 8))
+
+        self.btn_edit_environment = tk.Button(
+            environment_frame,
+            text="Edit Environment",
+            command=self.edit_environment,
+            bg='#6C757D',
+            fg='white',
+            activebackground='#545B62',
+            activeforeground='white',
+            **btn_style
+        )
+        self.btn_edit_environment.pack(pady=3, fill=tk.X)
+
         # ===== PROFILE ACTIONS =====
         profile_frame = tk.LabelFrame(
             right_frame,
@@ -1915,7 +2284,6 @@ class ProfileManagerApp:
         profile_frame.pack(fill=tk.X, pady=(0, 8))
         
         profile_buttons = [
-            ("Edit", self.edit_profile, '#6C757D', '#545B62'),
             ("✨ Tạo Profile", self.create_profile, '#0078D7', '#0053A0'),
             ("✏️ Đổi tên", self.rename_profile, '#28A745', '#1E7E34'),
             ("🗑️ Xóa", self.delete_profile, '#DC3545', '#BD2130'),
@@ -1937,7 +2305,6 @@ class ProfileManagerApp:
                 "create_profile": "btn_create_profile",
                 "rename_profile": "btn_rename_profile",
                 "delete_profile": "btn_delete_profile",
-                "edit_profile": "btn_edit_profile",
             }
             attribute = button_names.get(getattr(cmd, "__name__", ""))
             if attribute:
@@ -2010,6 +2377,44 @@ class ProfileManagerApp:
         self.tree.bind("<Double-Button-1>", lambda e: self.open_discord())
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
 
+    def _sidebar_pointer_inside(self, event):
+        """Return whether a global mouse event is inside the action sidebar."""
+        canvas = getattr(self, "sidebar_canvas", None)
+        if canvas is None:
+            return False
+        try:
+            x = event.x_root
+            y = event.y_root
+            left = canvas.winfo_rootx()
+            top = canvas.winfo_rooty()
+            return left <= x < left + canvas.winfo_width() and top <= y < top + canvas.winfo_height()
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            return False
+
+    def _scroll_sidebar_by(self, event, units):
+        """Scroll only the action sidebar for pointer events over its canvas."""
+        if not self._sidebar_pointer_inside(event):
+            return None
+        try:
+            self.sidebar_canvas.yview_scroll(units, "units")
+        except (AttributeError, tk.TclError):
+            return None
+        return "break"
+
+    def _on_sidebar_mousewheel(self, event):
+        """Handle Windows wheel deltas without stealing Treeview scrolling."""
+        try:
+            delta = int(event.delta)
+        except (AttributeError, TypeError, ValueError):
+            delta = 0
+        if delta:
+            units = -int(delta / 120)
+            if units == 0:
+                units = -1 if delta > 0 else 1
+        else:
+            units = -1 if getattr(event, "num", None) == 4 else 1
+        return self._scroll_sidebar_by(event, units)
+
     @staticmethod
     def _value(value, default=""):
         """Read a Tk variable or return a plain value for test doubles."""
@@ -2018,10 +2423,11 @@ class ProfileManagerApp:
         return default if value is None else value
 
     def _display_environment(self, record):
-        preset = record.get("environment_preset") or DEFAULT_ENVIRONMENT_PRESET
-        if str(preset).casefold() == DEFAULT_ENVIRONMENT_PRESET:
+        raw_preset = record.get("environment_preset")
+        if isinstance(raw_preset, str) and raw_preset.strip().casefold() == DEFAULT_ENVIRONMENT_PRESET:
             return "Default"
-        return str(preset).replace("_", " ").title()
+        preset, _ = effective_environment(record)
+        return preset.replace("_", " ").title()
 
     @staticmethod
     def _display_proxy(record):
@@ -2290,7 +2696,7 @@ class ProfileManagerApp:
         row_count = len(getattr(self, "profiles", []))
         self._set_button_state("btn_open_discord", tk.NORMAL if selected_count else tk.DISABLED)
         self._set_button_state("btn_rename_profile", tk.NORMAL if selected_count == 1 else tk.DISABLED)
-        self._set_button_state("btn_edit_profile", tk.NORMAL if selected_count == 1 else tk.DISABLED)
+        self._set_button_state("btn_edit_environment", tk.NORMAL if selected_count == 1 else tk.DISABLED)
         self._set_button_state("btn_delete_profile", tk.NORMAL if selected_count else tk.DISABLED)
         self._set_button_state("btn_select_all", tk.NORMAL if row_count else tk.DISABLED)
         self._set_button_state("btn_deselect_all", tk.NORMAL if selected_count else tk.DISABLED)
@@ -2309,6 +2715,184 @@ class ProfileManagerApp:
                 self.set_account_for_profile(profile_id)
         except (AttributeError, ProfileManagerError, OSError) as error:
             messagebox.showerror("Error", f"Could not edit profile account:\n{error}")
+
+    def edit_environment(self):
+        """Edit the selected profile's safe browser environment preset."""
+        profile = self.get_selected_profile()
+        if not profile:
+            return
+        profile_id, _ = profile
+
+        try:
+            record = next(
+                item for item in self.profile_manager.get_profile_metadata()
+                if item.get("profile_id") == profile_id
+            )
+            current_preset, current_config = effective_environment(record)
+        except (StopIteration, AttributeError, ProfileManagerError, OSError, TypeError, ValueError) as error:
+            messagebox.showerror("Error", f"Could not load profile environment:\n{error}")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Environment - {profile_id}")
+        dialog.geometry("470x500")
+        dialog.resizable(False, False)
+        dialog.configure(bg="#f5f6fa")
+        dialog.grab_set()
+
+        tk.Label(
+            dialog,
+            text="Browser Environment",
+            font=("Segoe UI", 13, "bold"),
+            bg="#f5f6fa",
+        ).pack(pady=(16, 4))
+        tk.Label(
+            dialog,
+            text="These settings apply only when this profile is launched.",
+            bg="#f5f6fa",
+            fg="#555555",
+        ).pack(pady=(0, 12))
+
+        form = tk.Frame(dialog, bg="#f5f6fa")
+        form.pack(fill=tk.X, padx=35)
+
+        preset_var = tk.StringVar(value=current_preset.title())
+        tk.Label(form, text="Preset", bg="#f5f6fa", anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(0, 12), pady=5
+        )
+        preset_menu = ttk.Combobox(
+            form,
+            textvariable=preset_var,
+            values=("Desktop", "Mobile", "Custom"),
+            state="readonly",
+            width=24,
+        )
+        preset_menu.grid(row=0, column=1, sticky="ew", pady=5)
+
+        initial_state = environment_editor_state(current_preset, current_config)
+        custom_values = dict(current_config) if current_preset == ENVIRONMENT_CUSTOM else {}
+        last_selected = [None]
+        width_var = tk.StringVar()
+        height_var = tk.StringVar()
+        scale_var = tk.StringVar()
+        language_var = tk.StringVar()
+        timezone_var = tk.StringVar()
+        mobile_var = tk.BooleanVar()
+        touch_var = tk.BooleanVar()
+
+        entry_specs = (
+            ("Viewport width", width_var),
+            ("Viewport height", height_var),
+            ("Device scale factor", scale_var),
+            ("Language / locale", language_var),
+            ("Timezone (stored only)", timezone_var),
+        )
+        entries = []
+        for row, (label, variable) in enumerate(entry_specs, start=1):
+            tk.Label(form, text=label, bg="#f5f6fa", anchor="w").grid(
+                row=row, column=0, sticky="w", padx=(0, 12), pady=4
+            )
+            entry = tk.Entry(form, textvariable=variable, width=26)
+            entry.grid(row=row, column=1, sticky="ew", pady=4)
+            entries.append(entry)
+
+        mobile_check = tk.Checkbutton(
+            form, text="Mobile mode", variable=mobile_var, bg="#f5f6fa", anchor="w"
+        )
+        mobile_check.grid(row=6, column=1, sticky="w", pady=3)
+        touch_check = tk.Checkbutton(
+            form, text="Touch mode", variable=touch_var, bg="#f5f6fa", anchor="w"
+        )
+        touch_check.grid(row=7, column=1, sticky="w", pady=3)
+        form.columnconfigure(1, weight=1)
+
+        note_var = tk.StringVar()
+        tk.Label(
+            dialog,
+            textvariable=note_var,
+            bg="#f5f6fa",
+            fg="#555555",
+            justify=tk.LEFT,
+            wraplength=390,
+        ).pack(pady=(10, 8), padx=35, anchor="w")
+
+        def set_variable(variable, value):
+            variable.set("" if value is None else str(value))
+
+        def capture_custom_values():
+            custom_values.clear()
+            custom_values.update({
+                "viewport_width": width_var.get(),
+                "viewport_height": height_var.get(),
+                "device_scale_factor": scale_var.get(),
+                "language": language_var.get(),
+                "timezone": timezone_var.get(),
+                "mobile_mode": mobile_var.get(),
+                "touch_mode": touch_var.get(),
+            })
+
+        def update_fields(*_):
+            if last_selected[0] == ENVIRONMENT_CUSTOM:
+                capture_custom_values()
+            selected = normalize_environment_preset(preset_var.get())
+            state = environment_editor_state(selected, custom_values)
+            set_variable(width_var, state["viewport_width"])
+            set_variable(height_var, state["viewport_height"])
+            set_variable(scale_var, state["device_scale_factor"])
+            set_variable(language_var, state["language"])
+            set_variable(timezone_var, state["timezone"])
+            mobile_var.set(state["mobile_mode"])
+            touch_var.set(state["touch_mode"])
+            if selected == ENVIRONMENT_MOBILE:
+                note_var.set(
+                    "Generic mobile Chromium settings: no branded phone or Safari identity is used."
+                )
+            elif selected == ENVIRONMENT_DESKTOP:
+                note_var.set("Desktop uses normal Chromium behavior with no environment overrides.")
+            else:
+                note_var.set(
+                    "Custom accepts safe viewport, scale, locale, and touch/mobile values. "
+                    "Timezone is stored but not applied by the current launcher."
+                )
+            widget_state = tk.NORMAL if state["editable"] else tk.DISABLED
+            for entry in entries:
+                entry.configure(state=widget_state)
+            mobile_check.configure(state=widget_state)
+            touch_check.configure(state=widget_state)
+            last_selected[0] = selected
+
+        def save_environment():
+            if last_selected[0] == ENVIRONMENT_CUSTOM:
+                capture_custom_values()
+            selected = normalize_environment_preset(preset_var.get())
+            config = {}
+            if selected == ENVIRONMENT_CUSTOM:
+                config = custom_values
+            elif selected == ENVIRONMENT_MOBILE:
+                # The Mobile preset is intentionally generic and fixed; the
+                # effective values are shown above but are not user-editable.
+                config = {}
+            try:
+                self.profile_manager.set_environment(profile_id, selected, config)
+                dialog.destroy()
+                self.refresh_list()
+                self.update_status(f"Environment updated for {profile_id}")
+            except (AttributeError, ProfileManagerError, OSError, TypeError, ValueError) as error:
+                messagebox.showerror("Error", f"Could not save profile environment:\n{error}", parent=dialog)
+
+        preset_menu.bind("<<ComboboxSelected>>", update_fields)
+        button_frame = tk.Frame(dialog, bg="#f5f6fa")
+        button_frame.pack(pady=(8, 16))
+        tk.Button(button_frame, text="Save", command=save_environment, width=12).pack(
+            side=tk.LEFT, padx=5
+        )
+        tk.Button(button_frame, text="Cancel", command=dialog.destroy, width=12).pack(
+            side=tk.LEFT, padx=5
+        )
+        # Apply the same state transition path used by preset changes so the
+        # initial Desktop/Mobile display is never made from stale variables.
+        preset_var.set(initial_state["preset"].title())
+        update_fields()
 
     def select_all_profiles(self):
         """Select all items in treeview"""
