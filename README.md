@@ -23,25 +23,35 @@ or is a directory instead of a file, startup displays the expected full path and
 returns after the error dialog is dismissed. A missing runtime encountered when
 opening a profile uses the existing GUI error dialog.
 
-## M1/M2 storage compatibility
+## M1/M2/M3 storage compatibility
 
-- Profiles remain at `legacy/data/<profile ID>/`.
-- The manager registry remains at `legacy/data/Local State`, with its existing format.
-- Logs remain at `legacy/log/`.
-- Extension sources are read from root `extensions/` and copied into each profile's
-  `Unpacked Extensions/` directory by the existing account workflow.
-- Existing per-profile extension copies and account configuration are retained.
-- Each launch keeps `--user-data-dir=<legacy/data/profile ID>` and the existing
-  launch flags, extension arguments, and Discord URL.
+- The manager registry remains at `legacy/data/Local State`, with its existing
+  format. `profiles.json` is not introduced yet.
+- New profiles use isolated roots under `profiles/profile_0001/`,
+  `profiles/profile_0002/`, and so on. A `manager_path` field in the existing
+  registry records the managed directory for each new profile.
+- Existing unmarked profiles continue working from `legacy/data/<profile ID>/`;
+  they are never moved automatically. Logs remain at `legacy/log/`.
+- `ProfileManager.migrate_profile(profile_id)` is an explicit, copy-only
+  migration for a registered legacy profile. It copies to a collision-free
+  `profiles/profile_####/` directory, updates metadata only after the copy
+  succeeds, and leaves the legacy source in place. A failed copy or metadata
+  update leaves the source untouched and reports the paths involved.
+- Extension sources are read from root `extensions/` and copied into each
+  profile's `Unpacked Extensions/` directory by the existing account workflow.
+  Existing per-profile extension copies and account configuration are retained.
+- Each launch keeps the existing launch flags, extension arguments, and Discord
+  URL while selecting the resolved legacy or managed user-data root.
 
-M2 does not relocate existing data, introduce `profiles.json`, or add presets,
-proxies, an updater, or new application modules. Legacy profile data and logs
-remain excluded from Git. Chromium runtime files are unchanged.
+M3 does not introduce `profiles.json`, presets, proxies, an updater, or new
+application modules. Legacy profile data, managed profiles, and logs remain
+excluded from Git. Chromium runtime files are unchanged.
 
 ## M2 lifecycle behavior
 
-- New profiles initialize `Default/Preferences` inside their existing user-data
-  root. Existing root-level legacy preferences are not moved or overwritten.
+- New profiles initialize `Default/Preferences` inside their `profiles/profile_####`
+  user-data root. Existing root-level legacy preferences are not moved or
+  overwritten.
 - IDs are checked against both the registry and existing directories/files.
   A failed creation can leave an unregistered directory, which is retained and
   never reused automatically.
@@ -63,8 +73,9 @@ remain excluded from Git. Chromium runtime files are unchanged.
 - A small `.manager.lock` file serializes manager profile mutations and launches.
   Stale metadata saves are rejected. Keep other software from editing this registry
   while manager operations are in progress.
-- Confirmed deletion first renames the directory to `.deleting-<ID>-<unique suffix>`
-  under `legacy/data/`, then updates the registry and removes the staged directory.
+- Confirmed deletion first renames the active directory to
+  `.deleting-<ID>-<unique suffix>` beside that directory, then updates the
+  registry and removes the staged directory.
   If the metadata save fails, the original directory is restored. A crash or failed
   cleanup can leave staged data; its location is reported and it is never cleaned
   automatically on restart. Inspect it before attempting recovery or removal.
@@ -73,8 +84,8 @@ Compatibility is supported for the existing manager's unopened profiles and for
 complete independent Chromium user-data roots. A legacy folder containing browser
 session files directly at its top level is treated as a shared-root subprofile and
 blocked with an explanatory error. Ambiguous layouts, invalid browser Local State,
-and missing last-used internal directories are also blocked. M2 does not move those
-files or guess a replacement data root; such layouts require a separate migration.
+and missing last-used internal directories are also blocked. M3's explicit copy
+migration rejects links and path collisions and never removes the legacy source.
 
 ## Automated checks
 
@@ -86,8 +97,9 @@ The unit tests use synthetic data in isolated directories under `tmp/`, suppress
 import-time log setup, and mock browser process creation and GUI dialogs. They
 do not open Chromium or access production account data. They cover startup,
 launch errors, Windows argument parsing, isolated launch paths, extension
-arguments, existing Local State preservation, profile operations, and account
-import/storage, lifecycle failures, process detection, and multi-profile opening.
+arguments, existing Local State preservation, profile operations, account
+import/storage, lifecycle failures, process detection, multi-profile opening,
+and copy-only legacy-to-`profiles/` migration safeguards.
 
 An additional opt-in test launches the real runtime in headless mode against a
 loopback HTTP fixture, using only disposable workspace profiles:
@@ -103,6 +115,12 @@ rename persistence, and preservation of one profile when another is deleted.
 Test directories are removed on success and retained under `tmp/` on failure.
 It does not test Discord login or visible GUI behavior.
 
+The headless smoke test is also sensitive to the local Chromium build and Windows
+graphics environment. On some hosts, Chromium can fail during GPU persistent-cache
+initialization with a sharing violation (`0x20`) and exit with `0x80000003` before
+the fixture page loads. This is an environment-specific smoke-test limitation;
+normal GUI launches through the manager should be validated separately.
+
 ## Exact manual acceptance checks
 
 Use disposable profiles for creation, account import, rename, and deletion.
@@ -113,9 +131,9 @@ Close a disposable profile's browser windows before deleting it.
    Select only `M1 Test A`, click Open Discord, and confirm Discord opens. Visit
    `chrome://version` in that window. Its executable path must end with
    `Discord_Profile_Manager\browser\chrome.exe`; for this fresh profile, its
-   profile path should end with `legacy\data\Profile N\Default`. Record the ID.
+   profile path should end with `profiles\profile_####\Default`. Record the ID.
 3. **Isolation:** Add a harmless bookmark named `M1 A marker` in A. Open B from
-   the manager while A is still open. Verify a different `Profile N` path in
+   the manager while A is still open. Verify a different `profile_####` path in
    `chrome://version` and that B does not contain A's bookmark.
 4. **Rename and restart:** Close both browser windows. Rename A to
    `M1 Test A renamed`. Close and restart the manager, then open the renamed
@@ -167,7 +185,8 @@ Close a disposable profile's browser windows before deleting it.
    prompt. The real `browser/` and `legacy/data/` directories are unaffected.
 
 Actual session preservation for an older external installation still requires
-validation against its known browser profile path. M2 does not guess or migrate
+validation against its known browser profile path. M3 only migrates registered
+profiles found under this application's `legacy/data/` root; it does not guess
 external storage layouts.
 
 ## Additional M2 manual checklist
@@ -197,4 +216,31 @@ directory damage, use a separate disposable application copy with no real accoun
 7. Test an approved copy of an existing independent legacy user-data root. Confirm
    the original `chrome://version` profile path, bookmark, and storage survive restart.
    A shared-root subprofile or ambiguous layout must show an explanatory error and
-   remain untouched; do not attempt migration as part of M2.
+   remain untouched.
+
+## M3 migration manual checklist
+
+Use a disposable copy of a registered legacy profile. Back up `legacy/data/Local State`
+before testing migration.
+
+1. Start with a registered profile whose directory is under `legacy/data/<ID>`.
+   Open it once and verify its cookies/bookmark, then close Chromium.
+2. In a Python console from the project root, call
+   `ProfileManager().migrate_profile(<ID>)` using the profile's exact ID. Confirm it
+   reports a `profile_####` ID, creates `profiles\profile_####`, and leaves the
+   original `legacy\data\<ID>` directory and its files unchanged.
+3. Restart the manager and open the migrated profile. In `chrome://version`, confirm
+   the user-data path is the new `profiles\profile_####` directory and the original
+   browser data remains available.
+4. Call the migration operation again for the same ID. It must return the same
+   managed ID without creating a second copy.
+5. Create another profile and confirm it uses the next collision-free
+   `profiles\profile_####` directory. Put an unrelated `profile_####` folder in
+   `profiles/` and confirm the next created profile does not overwrite it.
+6. With Chromium closed, temporarily replace the destination with a file or make
+   the source unreadable in a disposable copy. Retry migration and confirm a clear
+   error, an unchanged legacy source, and no metadata marker pointing at a missing
+   destination. Restore the backup before continuing.
+7. Delete a migrated disposable profile through the GUI. Confirm only its active
+   `profiles\profile_####` copy is removed; the original legacy source remains because
+   migration was copy-only.

@@ -114,7 +114,7 @@ class LifecycleTests(unittest.TestCase):
         marker.write_bytes(b'old data')
         (self.data / 'Profile 12').write_bytes(b'not a directory')
         pid = self.manager.ProfileManager().create_profile('New')
-        self.assertEqual(pid, 'Profile 13')
+        self.assertEqual(pid, 'profile_0001')
         self.assertEqual(marker.read_bytes(), b'old data')
 
     def test_failed_initialization_does_not_publish_metadata(self):
@@ -132,9 +132,9 @@ class LifecycleTests(unittest.TestCase):
         with patch.object(profiles.local_state, 'save', side_effect=self.manager.ProfileManagerError('synthetic write failure')):
             with self.assertRaises(self.manager.ProfileManagerError):
                 profiles.create_profile('New')
-        self.assertTrue((self.data / 'Profile 1' / 'Default' / 'Preferences').is_file())
+        self.assertTrue((self.profiles / 'profile_0001' / 'Default' / 'Preferences').is_file())
         self.assertEqual(profiles.get_profiles(), [])
-        self.assertEqual(profiles.create_profile('Next'), 'Profile 2')
+        self.assertEqual(profiles.create_profile('Next'), 'profile_0002')
 
     def test_unknown_profile_and_missing_directory_never_launch(self):
         self.make_runtime()
@@ -378,7 +378,7 @@ class LifecycleTests(unittest.TestCase):
         with state.operation():
             with self.assertRaisesRegex(self.manager.ProfileManagerError, 'operation is in progress'):
                 self.manager.ProfileManager().create_profile('Concurrent')
-        self.assertEqual(self.manager.ProfileManager().create_profile('Next'), 'Profile 1')
+        self.assertEqual(self.manager.ProfileManager().create_profile('Next'), 'profile_0001')
 
     def test_stale_registry_write_is_rejected(self):
         self.write_registry(b'{"profile":{"info_cache":{}}}')

@@ -32,12 +32,16 @@ from pathlib import PureWindowsPath
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 BROWSER_EXE = PROJECT_ROOT / "browser" / "chrome.exe"
-# Keep the existing profile data and Local State locations.
+# Keep the existing Local State location while new profile data moves to profiles/.
 DATA_DIR = BASE_DIR / "data"
+PROFILES_DIR = PROJECT_ROOT / "profiles"
 LOG_DIR = BASE_DIR / "log"
 EXT_DIR = PROJECT_ROOT / "extensions" / "discord-autofill-extension"
 TOKEN_EXT_DIR = PROJECT_ROOT / "extensions" / "discord-token-extractor-extension"
 LOCAL_STATE = DATA_DIR / "Local State"
+
+NEW_PROFILE_PATTERN = re.compile(r"^profile_(\d+)$", re.IGNORECASE)
+MANAGER_PATH_KEY = "manager_path"
 
 # Ensure log directory exists
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -102,6 +106,25 @@ def checked_path(path, root):
     if not path.resolve().is_relative_to(root.resolve()):
         raise ProfileManagerError("Profile path resolves outside its data directory.")
     return path
+
+
+def validate_manager_path(manager_path):
+    """Validate the managed profile directory name stored in Local State."""
+    if not isinstance(manager_path, str) or not NEW_PROFILE_PATTERN.fullmatch(manager_path):
+        raise ProfileManagerError("Invalid managed profile path in metadata. Restore or correct Local State before continuing.")
+    return manager_path
+
+
+def ensure_tree_has_no_links(root):
+    """Reject links/reparse points anywhere before copying a profile tree."""
+    root = checked_path(root, root.parent)
+    reparse_point = getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)
+    for current, directories, files in os.walk(root, followlinks=False):
+        for name in [*directories, *files]:
+            item = Path(current) / name
+            info = item.lstat()
+            if stat.S_ISLNK(info.st_mode) or reparse_point and getattr(info, 'st_file_attributes', 0) & reparse_point:
+                raise ProfileManagerError(f"Linked profile data cannot be migrated: {item}")
 
 
 def browser_using_directory(directory, exact=False):
@@ -194,6 +217,7 @@ class LocalStateManager:
         if not isinstance(cache, dict):
             raise ValueError('Expected profile.info_cache object')
         seen = set()
+        seen_manager_paths = set()
         for pid, info in cache.items():
             validate_profile_id(pid)
             if pid.casefold() in seen:
@@ -201,6 +225,13 @@ class LocalStateManager:
             seen.add(pid.casefold())
             if not isinstance(info, dict) or not isinstance(info.get('name', pid), str):
                 raise ValueError('Invalid profile entry or name')
+            manager_path = info.get(MANAGER_PATH_KEY)
+            if manager_path is not None:
+                validate_manager_path(manager_path)
+                folded_manager_path = manager_path.casefold()
+                if folded_manager_path in seen_manager_paths:
+                    raise ValueError('Managed profile paths refer to the same Windows directory')
+                seen_manager_paths.add(folded_manager_path)
             created = info.get('created', 0)
             if (isinstance(created, bool) or not isinstance(created, (int, float))
                     or created < 0 or created > 2**63 - 1 or not math.isfinite(created)):
@@ -224,8 +255,16 @@ class LocalStateManager:
                 directory = self.local_state_path.parent
                 existing = [path for path in directory.iterdir()
                             if path.name != '.manager.lock'] if directory.exists() else []
+                profiles_root = Path(PROFILES_DIR)
+                checked_path(profiles_root, PROJECT_ROOT)
+                if profiles_root.exists():
+                    existing.extend(path for path in profiles_root.iterdir()
+                                    if path.name != '.manager.lock')
                 if existing:
-                    raise ProfileManagerError(f"Profile metadata is missing, but existing data remains at {directory}. Restore Local State before continuing.")
+                    raise ProfileManagerError(
+                        f"Profile metadata is missing, but existing profile data remains at {directory} or {profiles_root}. "
+                        "Restore Local State before continuing."
+                    )
                 self._loaded_bytes = None
                 return self._create_default()
             raw = self.local_state_path.read_bytes()
@@ -304,21 +343,27 @@ class ProfileManager:
         return profiles
     
     def next_profile_id(self, cache):
-        """Generate next profile ID following Profile X pattern"""
-        pattern = re.compile(r"^Profile (\d+)$", re.IGNORECASE)
+        """Generate a collision-free ID for a profile in the new profiles root."""
         max_num = 0
-        
-        # Reserve orphaned directories and files as well as registered IDs.
-        for pid in [*cache, *[path.name for path in DATA_DIR.iterdir()]]:
-            if pid == "Default":
+
+        candidates = list(cache)
+        for info in cache.values():
+            if isinstance(info, dict) and isinstance(info.get(MANAGER_PATH_KEY), str):
+                candidates.append(info[MANAGER_PATH_KEY])
+        if PROFILES_DIR.is_dir():
+            candidates.extend(path.name for path in PROFILES_DIR.iterdir())
+        if DATA_DIR.is_dir():
+            candidates.extend(path.name for path in DATA_DIR.iterdir())
+        for candidate in candidates:
+            match = NEW_PROFILE_PATTERN.fullmatch(candidate)
+            if match:
+                max_num = max(max_num, int(match.group(1)))
                 continue
-            m = pattern.match(pid)
-            if m:
-                num = int(m.group(1))
-                if num > max_num:
-                    max_num = num
-        
-        return f"Profile {max_num + 1}"
+            pending = re.match(r'^\.deleting-(profile_\d+)-', candidate, re.IGNORECASE)
+            if pending:
+                max_num = max(max_num, int(pending.group(1).split('_', 1)[1]))
+
+        return f"profile_{max_num + 1:04d}"
     
     def create_profile(self, display_name=None):
         """Create a new profile and initialize it"""
@@ -334,6 +379,7 @@ class ProfileManager:
                 'name': display_name.strip() if display_name is not None else new_id,
                 'avatar_icon': 'chrome/theme/IDR_PROFILE_AVATAR_0',
                 'created': int(time.time()),
+                MANAGER_PATH_KEY: new_id,
             }
             # Publish only after initialization. Failed creations are never reused.
             self.local_state.save(data)
@@ -343,7 +389,8 @@ class ProfileManager:
     def _initialize_profile_structure(self, profile_id):
         """Create minimal Chromium profile structure without launching browser"""
 
-        profile_dir = self.get_profile_dir(profile_id)
+        profile_dir = self._resolve_profile_dir(profile_id)
+        profile_dir.parent.mkdir(parents=True, exist_ok=True)
         profile_dir.mkdir(exist_ok=False)
 
         # Minimal Preferences file
@@ -409,17 +456,17 @@ class ProfileManager:
             cache = data['profile']['info_cache']
             if profile_id not in cache:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found")
-            profile_dir = self.get_profile_dir(profile_id)
+            profile_dir = self._resolve_profile_dir(profile_id, cache[profile_id])
             if browser_using_directory(profile_dir):
                 raise ProfileManagerError(f"Close Chromium for {profile_id} before deleting it.")
             pending = None
             if profile_dir.exists():
                 if not profile_dir.is_dir():
                     raise ProfileManagerError(f"Profile path is not a directory: {profile_dir}")
-                pending = checked_path(DATA_DIR / f'.deleting-{profile_id}-{uuid.uuid4().hex}', DATA_DIR)
+                pending = checked_path(profile_dir.parent / f'.deleting-{profile_id}-{uuid.uuid4().hex}', profile_dir.parent)
                 profile_dir.rename(pending)
             else:
-                self._check_pending_delete(profile_id)
+                self._check_pending_delete(profile_id, profile_dir.parent)
             del cache[profile_id]
             try:
                 self.local_state.save(data)
@@ -431,7 +478,7 @@ class ProfileManager:
                 raise
             if pending is not None:
                 # Resolve and verify the recursive deletion target immediately beforehand.
-                checked_path(pending, DATA_DIR)
+                checked_path(pending, pending.parent)
                 try:
                     shutil.rmtree(pending)
                 except OSError as error:
@@ -440,27 +487,108 @@ class ProfileManager:
     
     def get_profile_dir(self, profile_id):
         """Get profile directory path"""
-        return checked_path(DATA_DIR / validate_profile_id(profile_id), DATA_DIR)
+        profile_id = validate_profile_id(profile_id)
+        data = self.local_state.load()
+        info = data['profile']['info_cache'].get(profile_id)
+        return self._resolve_profile_dir(profile_id, info)
+
+    def _resolve_profile_dir(self, profile_id, info=None):
+        """Resolve a profile to its managed directory without moving any data."""
+        profile_id = validate_profile_id(profile_id)
+        if info is not None and MANAGER_PATH_KEY in info:
+            manager_path = validate_manager_path(info[MANAGER_PATH_KEY])
+            return checked_path(PROFILES_DIR / manager_path, PROFILES_DIR)
+
+        # An unmarked entry is a legacy profile. Prefer it when present, even
+        # if its old ID happens to resemble the new profile_#### convention.
+        legacy_path = checked_path(DATA_DIR / profile_id, DATA_DIR)
+        if legacy_path.exists() or not NEW_PROFILE_PATTERN.fullmatch(profile_id):
+            return legacy_path
+        return checked_path(PROFILES_DIR / profile_id, PROFILES_DIR)
 
     def _check_registry_idle(self):
-        if browser_using_directory(DATA_DIR, exact=True):
-            raise ProfileManagerError("Chromium is using the shared legacy data directory. Close it before using the manager.")
+        for root, label in ((DATA_DIR, 'legacy'), (PROFILES_DIR, 'managed')):
+            if browser_using_directory(root, exact=True):
+                raise ProfileManagerError(f"Chromium is using the shared {label} data directory. Close it before using the manager.")
 
-    def _check_pending_delete(self, profile_id):
-        if not DATA_DIR.exists():
-            return
-        for path in DATA_DIR.iterdir():
-            if path.name.startswith(f'.deleting-{profile_id}-'):
-                raise ProfileManagerError(f"An interrupted deletion left data at {path}. Restore or inspect that directory before continuing.")
+    def _check_pending_delete(self, profile_id, parent=None):
+        roots = [parent] if parent is not None else [DATA_DIR, PROFILES_DIR]
+        for root in roots:
+            if not root.exists():
+                continue
+            for path in root.iterdir():
+                if path.name.startswith(f'.deleting-{profile_id}-'):
+                    raise ProfileManagerError(f"An interrupted deletion left data at {path}. Restore or inspect that directory before continuing.")
 
     def require_profile_dir(self, profile_id):
-        path = self.get_profile_dir(profile_id)
-        if profile_id not in self.local_state.load()['profile']['info_cache']:
+        profile_id = validate_profile_id(profile_id)
+        data = self.local_state.load()
+        info = data['profile']['info_cache'].get(profile_id)
+        if info is None:
             raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+        path = self._resolve_profile_dir(profile_id, info)
         if not path.is_dir():
-            self._check_pending_delete(profile_id)
+            self._check_pending_delete(profile_id, path.parent)
             raise ProfileNotFoundError(f"Profile directory is missing or invalid: {path}. Restore it before opening; no replacement profile was created.")
         return path
+
+    def migrate_profile(self, profile_id):
+        """Copy one legacy profile into profiles/ without altering its source."""
+        profile_id = validate_profile_id(profile_id)
+        with self.local_state.operation():
+            self._check_registry_idle()
+            data = self.local_state.load()
+            cache = data['profile']['info_cache']
+            info = cache.get(profile_id)
+            if info is None:
+                raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+
+            if MANAGER_PATH_KEY in info:
+                managed_id = validate_manager_path(info[MANAGER_PATH_KEY])
+                destination = checked_path(PROFILES_DIR / managed_id, PROFILES_DIR)
+                if not destination.is_dir():
+                    raise ProfileManagerError(
+                        f"Profile {profile_id} is marked as migrated, but its managed directory is missing: {destination}. "
+                        "The legacy source was left untouched."
+                    )
+                return managed_id
+
+            source = checked_path(DATA_DIR / profile_id, DATA_DIR)
+            if not source.exists():
+                self._check_pending_delete(profile_id, source.parent)
+                raise ProfileManagerError(f"Legacy profile directory is missing: {source}. No migration was performed.")
+            if not source.is_dir():
+                raise ProfileManagerError(f"Legacy profile path is not a directory: {source}. No migration was performed.")
+            if browser_using_directory(source):
+                raise ProfileManagerError(f"Close Chromium for {profile_id} before migrating it.")
+            destination = None
+            try:
+                ensure_tree_has_no_links(source)
+                checked_path(PROFILES_DIR, PROJECT_ROOT)
+                PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+                new_id = self.next_profile_id(cache)
+                destination = checked_path(PROFILES_DIR / new_id, PROFILES_DIR)
+                if destination.exists():
+                    raise ProfileManagerError(f"Cannot migrate {profile_id}: destination already exists at {destination}.")
+                shutil.copytree(source, destination)
+            except ProfileManagerError:
+                raise
+            except (OSError, shutil.Error) as error:
+                partial = f" A partial copy may remain at {destination}." if destination is not None else " No destination was created."
+                raise ProfileManagerError(
+                    f"Profile migration failed. The legacy source was left untouched at {source}.{partial}"
+                ) from error
+
+            info[MANAGER_PATH_KEY] = new_id
+            try:
+                self.local_state.save(data)
+            except Exception as error:
+                raise ProfileManagerError(
+                    f"Profile data was copied to {destination}, but metadata could not be updated. "
+                    f"The legacy source remains untouched at {source}; remove nothing automatically and retry after fixing Local State."
+                ) from error
+            logger.info(f"Migrated legacy profile {profile_id} to {destination}")
+            return new_id
 
     def get_browser_profile_dir(self, profile_id):
         """Validate an existing independent user-data root without migrating it."""

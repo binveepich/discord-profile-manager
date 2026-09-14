@@ -113,7 +113,9 @@ def main():
     try:
         with ExitStack() as stack:
             data = work / 'legacy/data'
+            managed_profiles = work / 'profiles'
             stack.enter_context(patch.object(module, 'DATA_DIR', data))
+            stack.enter_context(patch.object(module, 'PROFILES_DIR', managed_profiles))
             stack.enter_context(patch.object(module, 'LOCAL_STATE', data / 'Local State'))
             profiles = module.ProfileManager()
             first = profiles.create_profile('M2 smoke A')
@@ -160,7 +162,7 @@ def main():
                     assert match, 'Fixture page did not complete storage operations'
                     results[pid] = json.loads(html.unescape(match.group(1)))
                 deadline = time.monotonic() + 10
-                while any(module.browser_using_directory(data / pid) for pid in writes):
+                while any(module.browser_using_directory(managed_profiles / pid) for pid in writes):
                     if time.monotonic() > deadline:
                         raise AssertionError('Chromium children remained active after shutdown')
                     time.sleep(0.1)

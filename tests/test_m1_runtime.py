@@ -42,10 +42,12 @@ class RuntimeTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.data = self.work / "legacy" / "data"
+        self.profiles = self.work / "profiles"
         self.runtime = self.work / "browser" / "chrome.exe"
         self.extensions = self.work / "extensions"
         for name, value in {
             "DATA_DIR": self.data,
+            "PROFILES_DIR": self.profiles,
             "LOCAL_STATE": self.data / "Local State",
             "BROWSER_EXE": self.runtime,
             "EXT_DIR": self.extensions / "discord-autofill-extension",
@@ -97,6 +99,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(module.PROJECT_ROOT, PROJECT_ROOT)
         self.assertEqual(module.BROWSER_EXE, PROJECT_ROOT / "browser" / "chrome.exe")
         self.assertEqual(module.DATA_DIR, PROJECT_ROOT / "legacy" / "data")
+        self.assertEqual(module.PROFILES_DIR, PROJECT_ROOT / "profiles")
         self.assertEqual(module.LOCAL_STATE, module.DATA_DIR / "Local State")
         self.assertEqual(module.LOG_DIR, PROJECT_ROOT / "legacy" / "log")
         self.assertEqual(module.EXT_DIR, PROJECT_ROOT / "extensions" / "discord-autofill-extension")
@@ -106,6 +109,7 @@ class RuntimeTests(unittest.TestCase):
         project = self.work / "Project with spaces Thử nghiệm"
         module = load_manager(project / "legacy" / "profile_manager.py")
         self.assertEqual(module.BROWSER_EXE, project / "browser" / "chrome.exe")
+        self.assertEqual(module.PROFILES_DIR, project / "profiles")
         self.assertEqual(module.LOCAL_STATE, project / "legacy" / "data" / "Local State")
 
     def test_direct_launch_preserves_arguments(self):
