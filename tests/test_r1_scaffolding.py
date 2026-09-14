@@ -67,7 +67,7 @@ class R1ScaffoldingTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("VALIDATION: PASS", result.stdout)
-        self.assertIn("ENVIRONMENT: NOT IMPLEMENTED", result.stdout)
+        self.assertIn("ENVIRONMENT: PASS", result.stdout)
         self.assertIn("LEGACY/REVAMPED PARITY: NOT IMPLEMENTED", result.stdout)
 
     def test_revamped_main_refuses_without_stateful_workspace(self):
