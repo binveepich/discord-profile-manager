@@ -16,7 +16,7 @@ import time
 import re
 import shutil
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import signal
 import psutil
 import math
@@ -32,7 +32,10 @@ from pathlib import PureWindowsPath
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 BROWSER_EXE = PROJECT_ROOT / "browser" / "chrome.exe"
-# Keep the existing Local State location while new profile data moves to profiles/.
+# The application catalog is separate from Chromium's per-profile Local State.
+CONFIG_DIR = PROJECT_ROOT / "config"
+PROFILES_JSON = CONFIG_DIR / "profiles.json"
+# Keep the existing legacy registry for compatibility with M1-M3 installations.
 DATA_DIR = BASE_DIR / "data"
 PROFILES_DIR = PROJECT_ROOT / "profiles"
 LOG_DIR = BASE_DIR / "log"
@@ -42,6 +45,8 @@ LOCAL_STATE = DATA_DIR / "Local State"
 
 NEW_PROFILE_PATTERN = re.compile(r"^profile_(\d+)$", re.IGNORECASE)
 MANAGER_PATH_KEY = "manager_path"
+METADATA_VERSION = 1
+DEFAULT_ENVIRONMENT_PRESET = "default"
 
 # Ensure log directory exists
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -113,6 +118,15 @@ def validate_manager_path(manager_path):
     if not isinstance(manager_path, str) or not NEW_PROFILE_PATTERN.fullmatch(manager_path):
         raise ProfileManagerError("Invalid managed profile path in metadata. Restore or correct Local State before continuing.")
     return manager_path
+
+
+def validate_candidate_profile_name(profile_name):
+    """Return whether a directory name can safely become a profile ID."""
+    try:
+        validate_profile_id(profile_name)
+    except ProfileManagerError:
+        return False
+    return True
 
 
 def ensure_tree_has_no_links(root):
@@ -282,6 +296,7 @@ class LocalStateManager:
         try:
             self._validate(data)
             checked_path(self.local_state_path, DATA_DIR)
+            self.local_state_path.parent.mkdir(parents=True, exist_ok=True)
             current = self.local_state_path.read_bytes() if self.local_state_path.exists() else None
             if current != self._loaded_bytes:
                 raise ProfileManagerError("Profile metadata changed during this operation. Refresh and retry.")
@@ -313,6 +328,197 @@ class LocalStateManager:
             }
         }
 
+
+# ----------------------------------------------------------------------
+# Application Profile Metadata
+# ----------------------------------------------------------------------
+def utc_timestamp():
+    """Return a stable, timezone-aware timestamp for application metadata."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def timestamp_from_epoch(value):
+    """Convert legacy Chromium-style seconds to the M4 timestamp format."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or not math.isfinite(value):
+        return utc_timestamp()
+    try:
+        return datetime.fromtimestamp(value, timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    except (OverflowError, OSError, ValueError):
+        return utc_timestamp()
+
+
+def metadata_path_for_profile(path):
+    """Serialize a profile path relative to one of the two allowed profile roots."""
+    path = Path(path).absolute()
+    for root, prefix in ((PROFILES_DIR, ('profiles',)), (DATA_DIR, ('legacy', 'data'))):
+        root = Path(root).absolute()
+        if path.is_relative_to(root):
+            relative = path.relative_to(root)
+            if not relative.parts:
+                raise ProfileManagerError("A profile directory must be below its profile root.")
+            return '/'.join((*prefix, *relative.parts))
+    raise ProfileManagerError("Profile directory is outside the managed profile roots.")
+
+
+def profile_path_from_metadata(value):
+    """Resolve and validate a serialized profile path without accepting traversal."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ProfileManagerError("Invalid profile_directory in application metadata.")
+    windows_path = PureWindowsPath(value.replace('/', '\\'))
+    if windows_path.is_absolute() or windows_path.drive or any(part in ('', '.', '..') for part in windows_path.parts):
+        raise ProfileManagerError("Invalid profile_directory in application metadata.")
+    parts = windows_path.parts
+    folded_parts = tuple(part.casefold() for part in parts)
+    if folded_parts[:1] == ('profiles',) and len(parts) > 1:
+        root, relative_parts = Path(PROFILES_DIR), parts[1:]
+    elif folded_parts[:2] == ('legacy', 'data') and len(parts) > 2:
+        root, relative_parts = Path(DATA_DIR), parts[2:]
+    else:
+        raise ProfileManagerError("Profile directory must be under profiles/ or legacy/data/.")
+    candidate = root.joinpath(*relative_parts)
+    return checked_path(candidate, root)
+
+
+class ProfileMetadataManager:
+    """Read and atomically write application-owned profile metadata."""
+
+    _forbidden_fragments = (
+        'password', 'token', 'totp', 'cookie', 'session', 'proxycredential', 'extensionsecret'
+    )
+
+    def __init__(self):
+        self.path = PROFILES_JSON
+        self._loaded_bytes = None
+
+    @classmethod
+    def _validate_field_names(cls, value):
+        if isinstance(value, dict):
+            for field, nested in value.items():
+                normalized = str(field).replace('_', '').replace('-', '').casefold()
+                if any(fragment in normalized for fragment in cls._forbidden_fragments):
+                    raise ValueError(f"Sensitive field is not allowed in profiles.json: {field}")
+                cls._validate_field_names(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                cls._validate_field_names(nested)
+
+    @staticmethod
+    def _validate_timestamp(value, required=False):
+        if value is None and not required:
+            return
+        if not isinstance(value, str) or not value:
+            raise ValueError("Invalid application metadata timestamp")
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError as error:
+            raise ValueError("Invalid application metadata timestamp") from error
+        if parsed.tzinfo is None:
+            raise ValueError("Application metadata timestamps must include a timezone")
+
+    @classmethod
+    def _validate(cls, data):
+        if not isinstance(data, dict):
+            raise ValueError("Expected an application metadata object")
+        cls._validate_field_names(data)
+        version = data.get('version')
+        if isinstance(version, bool) or version != METADATA_VERSION:
+            raise ValueError("Unsupported application metadata version")
+        records = data.get('profiles')
+        if not isinstance(records, list):
+            raise ValueError("Expected a profiles list")
+
+        seen_ids = set()
+        seen_directories = set()
+        required = {
+            'profile_id', 'display_name', 'profile_directory', 'created_at',
+            'last_opened_at', 'environment_preset', 'proxy_enabled'
+        }
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("Invalid profile metadata record")
+            if not required.issubset(record):
+                raise ValueError("Incomplete profile metadata record")
+            profile_id = validate_profile_id(record['profile_id'])
+            folded_id = profile_id.casefold()
+            if folded_id in seen_ids:
+                raise ValueError("Duplicate profile IDs in profiles.json")
+            seen_ids.add(folded_id)
+            if not isinstance(record['display_name'], str) or not record['display_name'].strip():
+                raise ValueError("Invalid profile display name")
+            profile_path = profile_path_from_metadata(record['profile_directory'])
+            directory_key = metadata_path_for_profile(profile_path).casefold()
+            if directory_key in seen_directories:
+                raise ValueError("Duplicate profile directory mappings in profiles.json")
+            seen_directories.add(directory_key)
+            cls._validate_timestamp(record['created_at'], required=True)
+            cls._validate_timestamp(record['last_opened_at'])
+            if not isinstance(record['environment_preset'], str) or not record['environment_preset'].strip():
+                raise ValueError("Invalid environment preset")
+            if not isinstance(record['proxy_enabled'], bool):
+                raise ValueError("Invalid proxy_enabled value")
+        return data
+
+    @staticmethod
+    def _unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate metadata key')
+            result[key] = value
+        return result
+
+    def load(self):
+        """Load the catalog; missing or zero-byte metadata is treated as uninitialized."""
+        try:
+            if not self.path.exists():
+                self._loaded_bytes = None
+                return None
+            raw = self.path.read_bytes()
+            self._loaded_bytes = raw
+            if not raw.strip():
+                return None
+            data = json.loads(raw.decode('utf-8-sig'), object_pairs_hook=self._unique_keys)
+            return self._validate(data)
+        except ProfileManagerError:
+            raise
+        except (OSError, ValueError, UnicodeError) as error:
+            raise ProfileManagerError(
+                f"Cannot read application profile metadata: {self.path}. The file was left unchanged."
+            ) from error
+
+    def save(self, data):
+        """Validate and atomically replace profiles.json."""
+        temp_path = None
+        try:
+            self._validate(data)
+            parent = self.path.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            current = self.path.read_bytes() if self.path.exists() else None
+            if current != self._loaded_bytes:
+                raise ProfileManagerError("Application profile metadata changed during this operation. Refresh and retry.")
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=parent,
+                                             prefix='.profiles-', suffix='.tmp', delete=False) as temp:
+                temp_path = Path(temp.name)
+                json.dump(data, temp, indent=2, ensure_ascii=False)
+                temp.write('\n')
+                temp.flush()
+                os.fsync(temp.fileno())
+            candidate_bytes = temp_path.read_bytes()
+            candidate = json.loads(candidate_bytes.decode('utf-8'), object_pairs_hook=self._unique_keys)
+            self._validate(candidate)
+            temp_path.replace(self.path)
+            self._loaded_bytes = candidate_bytes
+        except ProfileManagerError:
+            raise
+        except (OSError, ValueError, UnicodeError) as error:
+            raise ProfileManagerError(f"Cannot save application profile metadata: {self.path}.") from error
+        finally:
+            if temp_path is not None and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    logger.warning("Could not remove a temporary profiles.json file")
+
 # ----------------------------------------------------------------------
 # Profile Management
 # ----------------------------------------------------------------------
@@ -321,16 +527,298 @@ class ProfileManager:
     
     def __init__(self):
         self.local_state = LocalStateManager()
-       
+        self.metadata = ProfileMetadataManager()
+        # Existing installations may still have integrations that inspect the
+        # legacy registry. Keep it synchronized when it exists, but never use
+        # it as the primary catalog after profiles.json is initialized.
+        self._legacy_mirror_enabled = LOCAL_STATE.exists()
+        self._unpublished_paths = set()
+
+    @staticmethod
+    def _empty_catalog():
+        return {'version': METADATA_VERSION, 'profiles': []}
+
+    @staticmethod
+    def _record(profile_id, display_name, profile_path, created_at=None, last_opened_at=None):
+        return {
+            'profile_id': profile_id,
+            'display_name': display_name,
+            'profile_directory': metadata_path_for_profile(profile_path),
+            'created_at': created_at or utc_timestamp(),
+            'last_opened_at': last_opened_at,
+            'environment_preset': DEFAULT_ENVIRONMENT_PRESET,
+            'proxy_enabled': False,
+        }
+
+    @staticmethod
+    def _record_map(data):
+        return {record['profile_id']: record for record in data['profiles']}
+
+    def _legacy_record(self, profile_id, info):
+        if not isinstance(info, dict):
+            raise ProfileManagerError(f"Invalid legacy profile metadata for {profile_id}.")
+        manager_path = info.get(MANAGER_PATH_KEY)
+        if manager_path is not None:
+            manager_path = validate_manager_path(manager_path)
+            profile_path = checked_path(PROFILES_DIR / manager_path, PROFILES_DIR)
+        else:
+            profile_path = checked_path(DATA_DIR / profile_id, DATA_DIR)
+        display_name = info.get('name', profile_id)
+        if not isinstance(display_name, str) or not display_name.strip():
+            display_name = profile_id
+        return self._record(
+            profile_id,
+            display_name,
+            profile_path,
+            created_at=timestamp_from_epoch(info.get('created', 0)),
+            last_opened_at=info.get('last_opened_at') if isinstance(info.get('last_opened_at'), str) else None,
+        )
+
+    @staticmethod
+    def _looks_like_profile_directory(path):
+        return path.is_dir() and (
+            (path / 'Default' / 'Preferences').is_file()
+            or (path / 'Preferences').is_file()
+        )
+
+    def _scan_profile_root(self, root):
+        """Find valid-looking profile roots without touching their contents."""
+        found = []
+        root = Path(root)
+        if not root.is_dir():
+            return found
+        for path in root.iterdir():
+            if path.name in ('.manager.lock', 'Local State') or path.name.startswith('.'):
+                continue
+            if (Path(root).absolute() == Path(PROFILES_DIR).absolute()
+                    and not NEW_PROFILE_PATTERN.fullmatch(path.name)):
+                continue
+            if not validate_candidate_profile_name(path.name):
+                continue
+            try:
+                checked_path(path, root)
+            except ProfileManagerError:
+                continue
+            if self._looks_like_profile_directory(path):
+                if path.absolute() not in self._unpublished_paths:
+                    found.append(path)
+        return found
+
+    def _read_legacy_catalog_for_bootstrap(self, managed_paths, legacy_paths):
+        """Read the old registry only when profiles.json has not been initialized."""
+        if LOCAL_STATE.exists():
+            try:
+                return self.local_state.load()
+            except ProfileManagerError:
+                # A valid managed/legacy profile can still be recovered without
+                # trusting a damaged pre-M4 registry. If there is no physical
+                # profile to recover, retain the M1-M3 safety error unchanged.
+                if not managed_paths and not legacy_paths:
+                    raise
+                logger.warning("Legacy Local State could not be read; recovering physical profiles into profiles.json")
+                return self.local_state._create_default()
+
+        if not managed_paths and not legacy_paths:
+            # Preserve M1-M3 behavior for unrelated legacy files/directories.
+            state = self.local_state.load()
+        else:
+            state = self.local_state._create_default()
+        # Keep a compatibility registry available for old integrations. This
+        # file is not used as the application catalog after this bootstrap.
+        self.local_state.save(state)
+        return state
+
+    def _bootstrap_catalog(self):
+        managed_paths = self._scan_profile_root(PROFILES_DIR)
+        legacy_paths = self._scan_profile_root(DATA_DIR)
+        legacy_state = self._read_legacy_catalog_for_bootstrap(managed_paths, legacy_paths)
+        catalog = self._empty_catalog()
+        known_ids = set()
+        known_directories = set()
+        cache = legacy_state.get('profile', {}).get('info_cache', {})
+
+        for profile_id, info in cache.items():
+            record = self._legacy_record(profile_id, info)
+            directory_key = record['profile_directory'].casefold()
+            if record['profile_id'].casefold() in known_ids or directory_key in known_directories:
+                raise ProfileManagerError("Duplicate profile metadata in the legacy Local State.")
+            catalog['profiles'].append(record)
+            known_ids.add(record['profile_id'].casefold())
+            known_directories.add(directory_key)
+
+        for path in [*managed_paths, *legacy_paths]:
+            profile_id = path.name
+            folded_id = profile_id.casefold()
+            directory_key = metadata_path_for_profile(path).casefold()
+            if directory_key in known_directories:
+                continue
+            if folded_id in known_ids:
+                # The legacy registry already owns this ID. Keep its explicit
+                # mapping rather than guessing a replacement directory.
+                continue
+            record = self._record(profile_id, profile_id, path)
+            catalog['profiles'].append(record)
+            known_ids.add(folded_id)
+            known_directories.add(directory_key)
+
+        self.metadata.save(catalog)
+        self._legacy_mirror_enabled = True
+        return catalog
+
+    def _reconcile_managed_profiles(self, catalog):
+        """Import valid managed folders absent from an existing catalog."""
+        known_ids = {record['profile_id'].casefold() for record in catalog['profiles']}
+        known_directories = {record['profile_directory'].casefold() for record in catalog['profiles']}
+        changed = False
+        for path in self._scan_profile_root(PROFILES_DIR):
+            directory_key = metadata_path_for_profile(path).casefold()
+            if directory_key in known_directories:
+                continue
+            # If the same ID was already recorded against a missing legacy
+            # path, physical managed data takes precedence for recovery.
+            matching = next((record for record in catalog['profiles']
+                             if record['profile_id'].casefold() == path.name.casefold()), None)
+            if matching is not None:
+                old_path = profile_path_from_metadata(matching['profile_directory'])
+                if not old_path.exists():
+                    matching['profile_directory'] = metadata_path_for_profile(path)
+                    changed = True
+                continue
+            if path.name.casefold() in known_ids:
+                continue
+            catalog['profiles'].append(self._record(path.name, path.name, path))
+            known_ids.add(path.name.casefold())
+            known_directories.add(directory_key)
+            changed = True
+        return changed
+
+    def _reconcile_legacy_profiles(self, catalog):
+        """Import newly discovered legacy records without making them primary."""
+        if not LOCAL_STATE.exists():
+            return False
+        try:
+            legacy_state = self.local_state.load()
+        except ProfileManagerError:
+            logger.warning("Ignoring unreadable legacy Local State because profiles.json is already available")
+            return False
+        known_ids = {record['profile_id'].casefold() for record in catalog['profiles']}
+        known_directories = {record['profile_directory'].casefold() for record in catalog['profiles']}
+        changed = False
+        for profile_id, info in legacy_state.get('profile', {}).get('info_cache', {}).items():
+            if profile_id.casefold() in known_ids:
+                continue
+            record = self._legacy_record(profile_id, info)
+            directory_key = record['profile_directory'].casefold()
+            if directory_key in known_directories:
+                continue
+            catalog['profiles'].append(record)
+            known_ids.add(profile_id.casefold())
+            known_directories.add(directory_key)
+            changed = True
+        return changed
+
+    def _load_catalog(self):
+        catalog = self.metadata.load()
+        if catalog is None:
+            return self._bootstrap_catalog()
+        changed = self._reconcile_legacy_profiles(catalog)
+        changed = self._reconcile_managed_profiles(catalog) or changed
+        if changed:
+            self.metadata.save(catalog)
+        return catalog
+
+    def initialize_metadata(self):
+        """Bootstrap or validate profiles.json during application startup."""
+        with self.local_state.operation():
+            self._check_registry_idle()
+            self._load_catalog()
+
+    def get_profile_metadata(self):
+        """Return application metadata records without exposing mutable storage."""
+        return [dict(record) for record in self._load_catalog()['profiles']]
+
+    def _legacy_info_for_record(self, record, existing=None):
+        info = dict(existing or {})
+        info['name'] = record['display_name']
+        try:
+            info['created'] = int(datetime.fromisoformat(record['created_at'].replace('Z', '+00:00')).timestamp())
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            info['created'] = 0
+        path = profile_path_from_metadata(record['profile_directory'])
+        if path.absolute().is_relative_to(Path(PROFILES_DIR).absolute()):
+            info[MANAGER_PATH_KEY] = path.name
+        else:
+            info.pop(MANAGER_PATH_KEY, None)
+        return info
+
+    def _sync_legacy_registry(self, catalog):
+        """Maintain the pre-M4 registry as a compatibility mirror when active."""
+        if not self._legacy_mirror_enabled:
+            return None
+        try:
+            state = self.local_state.load()
+        except ProfileManagerError:
+            # profiles.json is authoritative after bootstrap. A damaged or
+            # removed compatibility mirror must not block profile operations.
+            logger.warning("Skipping legacy Local State mirror update because it is unreadable")
+            self._legacy_mirror_enabled = False
+            return None
+        cache = state['profile']['info_cache']
+        existing = {profile_id: dict(info) for profile_id, info in cache.items()}
+        state['profile']['info_cache'] = {
+            record['profile_id']: self._legacy_info_for_record(record, existing.get(record['profile_id']))
+            for record in catalog['profiles']
+        }
+        self.local_state.save(state)
+        return state
+
+    def _restore_legacy_registry(self, original_bytes):
+        """Restore the compatibility mirror if profiles.json publication fails."""
+        try:
+            if original_bytes is None:
+                if LOCAL_STATE.exists():
+                    LOCAL_STATE.unlink()
+                self.local_state._loaded_bytes = None
+                return
+            LOCAL_STATE.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(mode='wb', dir=LOCAL_STATE.parent,
+                                                 prefix='.local-state-rollback-', suffix='.tmp', delete=False) as temp:
+                    temp_path = Path(temp.name)
+                    temp.write(original_bytes)
+                    temp.flush()
+                    os.fsync(temp.fileno())
+                temp_path.replace(LOCAL_STATE)
+            finally:
+                if temp_path is not None and temp_path.exists():
+                    temp_path.unlink()
+            self.local_state._loaded_bytes = original_bytes
+        except OSError as error:
+            logger.error(f"Could not restore the legacy Local State mirror: {error}")
+
+    def _save_catalog(self, catalog):
+        """Publish application metadata and the optional legacy mirror safely."""
+        original_legacy = None
+        mirror_attempted = False
+        try:
+            if self._legacy_mirror_enabled:
+                original_legacy = LOCAL_STATE.read_bytes() if LOCAL_STATE.exists() else None
+                mirror_attempted = True
+                self._sync_legacy_registry(catalog)
+            self.metadata.save(catalog)
+        except Exception:
+            if mirror_attempted:
+                self._restore_legacy_registry(original_legacy)
+            raise
+
     def get_profiles(self):
-        """Return list of (profile_id, display_name) sorted by name"""
-        data = self.local_state.load()
-        cache = data.get("profile", {}).get("info_cache", {})
+        """Return list of (profile_id, display_name) sorted by name."""
+        records = self._load_catalog()['profiles']
         
         profiles = []
-        for pid, info in cache.items():
-            name = info.get("name", pid)
-            profiles.append((pid, name))
+        for record in records:
+            profiles.append((record['profile_id'], record['display_name']))
         
         # Sort alphabetically by display name
         profiles.sort(key=lambda x: x[1].lower())
@@ -346,10 +834,17 @@ class ProfileManager:
         """Generate a collision-free ID for a profile in the new profiles root."""
         max_num = 0
 
-        candidates = list(cache)
-        for info in cache.values():
-            if isinstance(info, dict) and isinstance(info.get(MANAGER_PATH_KEY), str):
+        candidates = list(cache) if isinstance(cache, dict) else []
+        for info in cache.values() if isinstance(cache, dict) else []:
+            if not isinstance(info, dict):
+                continue
+            if isinstance(info.get(MANAGER_PATH_KEY), str):
                 candidates.append(info[MANAGER_PATH_KEY])
+            if isinstance(info.get('profile_directory'), str):
+                try:
+                    candidates.append(profile_path_from_metadata(info['profile_directory']).name)
+                except ProfileManagerError:
+                    pass
         if PROFILES_DIR.is_dir():
             candidates.extend(path.name for path in PROFILES_DIR.iterdir())
         if DATA_DIR.is_dir():
@@ -371,18 +866,21 @@ class ProfileManager:
             raise ProfileManagerError("Profile name must not be empty.")
         with self.local_state.operation():
             self._check_registry_idle()
-            data = self.local_state.load()
-            cache = data['profile']['info_cache']
-            new_id = self.next_profile_id(cache)
+            catalog = self._load_catalog()
+            new_id = self.next_profile_id(self._record_map(catalog))
             self._initialize_profile_structure(new_id)
-            cache[new_id] = {
-                'name': display_name.strip() if display_name is not None else new_id,
-                'avatar_icon': 'chrome/theme/IDR_PROFILE_AVATAR_0',
-                'created': int(time.time()),
-                MANAGER_PATH_KEY: new_id,
-            }
+            profile_dir = self._resolve_profile_dir(new_id)
+            catalog['profiles'].append(self._record(
+                new_id,
+                display_name.strip() if display_name is not None else new_id,
+                profile_dir,
+            ))
             # Publish only after initialization. Failed creations are never reused.
-            self.local_state.save(data)
+            try:
+                self._save_catalog(catalog)
+            except Exception:
+                self._unpublished_paths.add(profile_dir.absolute())
+                raise
             logger.info(f"Profile {new_id} created successfully")
             return new_id
     
@@ -443,20 +941,24 @@ class ProfileManager:
         with self.local_state.operation():
             self._check_registry_idle()
             self.require_profile_dir(profile_id)
-            data = self.local_state.load()
-            data['profile']['info_cache'][profile_id]['name'] = new_name.strip()
-            self.local_state.save(data)
+            catalog = self._load_catalog()
+            record = self._record_map(catalog).get(profile_id)
+            if record is None:
+                raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+            record['display_name'] = new_name.strip()
+            self._save_catalog(catalog)
         logger.info(f"Profile {profile_id} renamed to {new_name}")
     
     def delete_profile(self, profile_id):
         """Delete a profile and its data"""
+        profile_id = validate_profile_id(profile_id)
         with self.local_state.operation():
             self._check_registry_idle()
-            data = self.local_state.load()
-            cache = data['profile']['info_cache']
-            if profile_id not in cache:
+            catalog = self._load_catalog()
+            record = self._record_map(catalog).get(profile_id)
+            if record is None:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found")
-            profile_dir = self._resolve_profile_dir(profile_id, cache[profile_id])
+            profile_dir = self._resolve_profile_dir(profile_id, record)
             if browser_using_directory(profile_dir):
                 raise ProfileManagerError(f"Close Chromium for {profile_id} before deleting it.")
             pending = None
@@ -467,9 +969,10 @@ class ProfileManager:
                 profile_dir.rename(pending)
             else:
                 self._check_pending_delete(profile_id, profile_dir.parent)
-            del cache[profile_id]
+            catalog['profiles'] = [item for item in catalog['profiles']
+                                   if item['profile_id'] != profile_id]
             try:
-                self.local_state.save(data)
+                self._save_catalog(catalog)
             except Exception:
                 if pending is not None:
                     if profile_dir.exists():
@@ -488,13 +991,22 @@ class ProfileManager:
     def get_profile_dir(self, profile_id):
         """Get profile directory path"""
         profile_id = validate_profile_id(profile_id)
-        data = self.local_state.load()
-        info = data['profile']['info_cache'].get(profile_id)
-        return self._resolve_profile_dir(profile_id, info)
+        catalog = self.metadata.load()
+        if catalog is None and not LOCAL_STATE.exists() and not DATA_DIR.exists() and not PROFILES_DIR.exists():
+            # Preserve the read-only path helper behavior for callers that
+            # only need to construct a launch error; require_profile_dir()
+            # still enforces registration before any browser starts.
+            return self._resolve_profile_dir(profile_id)
+        record = self._record_map(self._load_catalog()).get(profile_id)
+        if record is None:
+            return self._resolve_profile_dir(profile_id)
+        return self._resolve_profile_dir(profile_id, record)
 
     def _resolve_profile_dir(self, profile_id, info=None):
         """Resolve a profile to its managed directory without moving any data."""
         profile_id = validate_profile_id(profile_id)
+        if info is not None and 'profile_directory' in info:
+            return profile_path_from_metadata(info['profile_directory'])
         if info is not None and MANAGER_PATH_KEY in info:
             manager_path = validate_manager_path(info[MANAGER_PATH_KEY])
             return checked_path(PROFILES_DIR / manager_path, PROFILES_DIR)
@@ -522,11 +1034,13 @@ class ProfileManager:
 
     def require_profile_dir(self, profile_id):
         profile_id = validate_profile_id(profile_id)
-        data = self.local_state.load()
-        info = data['profile']['info_cache'].get(profile_id)
-        if info is None:
+        if (self.metadata.load() is None and not LOCAL_STATE.exists()
+                and not DATA_DIR.exists() and not PROFILES_DIR.exists()):
             raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
-        path = self._resolve_profile_dir(profile_id, info)
+        record = self._record_map(self._load_catalog()).get(profile_id)
+        if record is None:
+            raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+        path = self._resolve_profile_dir(profile_id, record)
         if not path.is_dir():
             self._check_pending_delete(profile_id, path.parent)
             raise ProfileNotFoundError(f"Profile directory is missing or invalid: {path}. Restore it before opening; no replacement profile was created.")
@@ -537,15 +1051,15 @@ class ProfileManager:
         profile_id = validate_profile_id(profile_id)
         with self.local_state.operation():
             self._check_registry_idle()
-            data = self.local_state.load()
-            cache = data['profile']['info_cache']
-            info = cache.get(profile_id)
-            if info is None:
+            catalog = self._load_catalog()
+            record = self._record_map(catalog).get(profile_id)
+            if record is None:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
 
-            if MANAGER_PATH_KEY in info:
-                managed_id = validate_manager_path(info[MANAGER_PATH_KEY])
-                destination = checked_path(PROFILES_DIR / managed_id, PROFILES_DIR)
+            current_path = self._resolve_profile_dir(profile_id, record)
+            if current_path.absolute().is_relative_to(Path(PROFILES_DIR).absolute()):
+                managed_id = current_path.name
+                destination = checked_path(current_path, PROFILES_DIR)
                 if not destination.is_dir():
                     raise ProfileManagerError(
                         f"Profile {profile_id} is marked as migrated, but its managed directory is missing: {destination}. "
@@ -566,7 +1080,7 @@ class ProfileManager:
                 ensure_tree_has_no_links(source)
                 checked_path(PROFILES_DIR, PROJECT_ROOT)
                 PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-                new_id = self.next_profile_id(cache)
+                new_id = self.next_profile_id(self._record_map(catalog))
                 destination = checked_path(PROFILES_DIR / new_id, PROFILES_DIR)
                 if destination.exists():
                     raise ProfileManagerError(f"Cannot migrate {profile_id}: destination already exists at {destination}.")
@@ -579,16 +1093,40 @@ class ProfileManager:
                     f"Profile migration failed. The legacy source was left untouched at {source}.{partial}"
                 ) from error
 
-            info[MANAGER_PATH_KEY] = new_id
             try:
-                self.local_state.save(data)
+                record['profile_directory'] = metadata_path_for_profile(destination)
+                self._save_catalog(catalog)
             except Exception as error:
+                self._unpublished_paths.add(destination.absolute())
                 raise ProfileManagerError(
                     f"Profile data was copied to {destination}, but metadata could not be updated. "
                     f"The legacy source remains untouched at {source}; remove nothing automatically and retry after fixing Local State."
                 ) from error
             logger.info(f"Migrated legacy profile {profile_id} to {destination}")
             return new_id
+
+    def mark_profile_opened(self, profile_id, catalog=None):
+        """Update last_opened_at for a successful launch.
+
+        Chromium is already launched when the launcher calls this while its
+        existing operation lock is held, so the optional catalog avoids a
+        nested lock acquisition.
+        """
+        if catalog is None:
+            with self.local_state.operation():
+                self._check_registry_idle()
+                catalog = self._load_catalog()
+                self._mark_profile_opened(catalog, profile_id)
+                self._save_catalog(catalog)
+            return
+        self._mark_profile_opened(catalog, profile_id)
+        self._save_catalog(catalog)
+
+    def _mark_profile_opened(self, catalog, profile_id):
+        record = self._record_map(catalog).get(profile_id)
+        if record is None:
+            raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+        record['last_opened_at'] = utc_timestamp()
 
     def get_browser_profile_dir(self, profile_id):
         """Validate an existing independent user-data root without migrating it."""
@@ -871,6 +1409,7 @@ class ChromiumLauncher:
         profiles = ProfileManager()
         with profiles.local_state.operation():
             profiles._check_registry_idle()
+            catalog = profiles._load_catalog()
             profile_data_dir = profiles.require_profile_dir(profile_id)
             previous = self._processes.get(profile_id)
             if (previous is not None and previous.poll() is None) or browser_using_directory(profile_data_dir):
@@ -908,6 +1447,7 @@ class ChromiumLauncher:
                 if process.poll() not in (None, 0):
                     raise ProfileManagerError(f"Chromium exited before opening profile {profile_id}.")
                 self._processes[profile_id] = process
+                profiles.mark_profile_opened(profile_id, catalog)
                 return True
             except OSError as error:
                 raise ProfileManagerError(f"Cannot launch Chromium: {error}") from error
@@ -1322,16 +1862,13 @@ class ProfileManagerApp:
         
         try:
             selected_ids = {pid for pid, _ in self.get_selected_profiles()}
-            # Load raw data from Local State
-            data = self.profile_manager.local_state.load()
-            cache = data.get("profile", {}).get("info_cache", {})
-            
-            # Build list with created timestamp
-            raw_profiles = []
-            for pid, info in cache.items():
-                name = info.get("name", pid)
-                created = info.get("created", 0)
-                raw_profiles.append((pid, name, created))
+            # Application metadata is the primary list; Chromium Local State
+            # remains internal browser data and the legacy registry is only a
+            # compatibility mirror.
+            raw_profiles = [
+                (record['profile_id'], record['display_name'], record['created_at'])
+                for record in self.profile_manager.get_profile_metadata()
+            ]
             
             # Sort according to selected method
             sort_by = self.sort_method.get()
@@ -1859,18 +2396,26 @@ def main():
                 error_root.destroy()
             return
         
-        # Ensure data directory exists
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        
         # Start application
         root = tk.Tk()
 
-        # Initialize only a genuinely fresh registry; never reset existing data.
+        # Keep the legacy registry available for M1-M3 compatibility, but let
+        # ProfileManager bootstrap the application-owned profiles.json catalog.
         try:
             state = LocalStateManager()
             with state.operation():
                 if not LOCAL_STATE.exists():
-                    state.save(state.load())
+                    # A missing legacy registry is safe to initialize when the
+                    # legacy data root is empty. Existing legacy files remain
+                    # protected by LocalStateManager.load(). Managed profiles
+                    # are discovered by ProfileManager below.
+                    if PROFILES_JSON.exists():
+                        state.save(state._create_default())
+                    elif DATA_DIR.exists() and any(path.name != '.manager.lock' for path in DATA_DIR.iterdir()):
+                        state.save(state.load())
+                    else:
+                        state.save(state._create_default())
+            ProfileManager().initialize_metadata()
         except ProfileManagerError as error:
             messagebox.showerror('Profile metadata error', str(error), parent=root)
             root.destroy()

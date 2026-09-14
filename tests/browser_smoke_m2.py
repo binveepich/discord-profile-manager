@@ -114,8 +114,11 @@ def main():
         with ExitStack() as stack:
             data = work / 'legacy/data'
             managed_profiles = work / 'profiles'
+            config = work / 'config'
             stack.enter_context(patch.object(module, 'DATA_DIR', data))
             stack.enter_context(patch.object(module, 'PROFILES_DIR', managed_profiles))
+            stack.enter_context(patch.object(module, 'CONFIG_DIR', config))
+            stack.enter_context(patch.object(module, 'PROFILES_JSON', config / 'profiles.json'))
             stack.enter_context(patch.object(module, 'LOCAL_STATE', data / 'Local State'))
             profiles = module.ProfileManager()
             first = profiles.create_profile('M2 smoke A')

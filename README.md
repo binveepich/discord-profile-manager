@@ -23,29 +23,43 @@ or is a directory instead of a file, startup displays the expected full path and
 returns after the error dialog is dismissed. A missing runtime encountered when
 opening a profile uses the existing GUI error dialog.
 
-## M1/M2/M3 storage compatibility
+## M1/M2/M3/M4 storage compatibility
 
-- The manager registry remains at `legacy/data/Local State`, with its existing
-  format. `profiles.json` is not introduced yet.
+- Application-owned profile metadata is stored at `config/profiles.json` with a
+  versioned `profiles` list. It contains profile IDs, display names, relative
+  profile directories, timestamps, and the M4 environment/proxy placeholders.
+- The existing `legacy/data/Local State` registry is retained as a compatibility
+  reader/mirror for M1-M3 installations. It is not the primary application
+  profile catalog, and Chromium-owned Local State files inside user-data roots
+  are not rewritten by M4.
 - New profiles use isolated roots under `profiles/profile_0001/`,
-  `profiles/profile_0002/`, and so on. A `manager_path` field in the existing
-  registry records the managed directory for each new profile.
+  `profiles/profile_0002/`, and so on. The corresponding `profile_directory`
+  field in `config/profiles.json` records the managed directory.
 - Existing unmarked profiles continue working from `legacy/data/<profile ID>/`;
   they are never moved automatically. Logs remain at `legacy/log/`.
 - `ProfileManager.migrate_profile(profile_id)` is an explicit, copy-only
   migration for a registered legacy profile. It copies to a collision-free
-  `profiles/profile_####/` directory, updates metadata only after the copy
-  succeeds, and leaves the legacy source in place. A failed copy or metadata
-  update leaves the source untouched and reports the paths involved.
+  `profiles/profile_####/` directory, updates both application metadata and the
+  compatibility mirror only after the copy succeeds, and leaves the legacy
+  source in place. A failed copy or metadata update leaves the source untouched
+  and reports the paths involved.
 - Extension sources are read from root `extensions/` and copied into each
   profile's `Unpacked Extensions/` directory by the existing account workflow.
   Existing per-profile extension copies and account configuration are retained.
 - Each launch keeps the existing launch flags, extension arguments, and Discord
   URL while selecting the resolved legacy or managed user-data root.
 
-M3 does not introduce `profiles.json`, presets, proxies, an updater, or new
-application modules. Legacy profile data, managed profiles, and logs remain
-excluded from Git. Chromium runtime files are unchanged.
+M4 does not implement environment emulation, mobile behavior, proxy networking,
+an updater, credential redesign, or GUI/module migration. Legacy profile data,
+managed profiles, and logs remain excluded from Git. Chromium runtime files are
+unchanged.
+
+When `config/profiles.json` is missing or empty, the manager imports registered
+M1-M3 profiles and discovers valid existing managed profile roots without
+deleting or moving them. Malformed metadata is left unchanged and reported;
+missing directories remain metadata entries rather than being recreated. Valid
+managed folders absent from the catalog are safely re-imported. Metadata writes
+use a temporary file, validation, flush, and atomic replacement.
 
 ## M2 lifecycle behavior
 
@@ -67,9 +81,10 @@ excluded from Git. Chromium runtime files are unchanged.
   account preference changes. Uninspectable browser processes produce a clear error.
 - `Default` selection works by ID, independent of its star icon. Refresh preserves
   selected IDs; malformed metadata clears stale rows and displays an error.
-- Invalid JSON/schema, unreadable metadata, and a missing registry alongside
-  existing directories never trigger an automatic reset. Correct or restore the
-  registry, then restart or refresh. Unknown valid fields are preserved.
+- Invalid JSON/schema and unreadable metadata never trigger an automatic reset.
+  Correct or restore the affected file, then restart or refresh. Unknown valid
+  application fields are preserved; sensitive credential/session fields are
+  rejected from `profiles.json`.
 - A small `.manager.lock` file serializes manager profile mutations and launches.
   Stale metadata saves are rejected. Keep other software from editing this registry
   while manager operations are in progress.
@@ -99,7 +114,8 @@ do not open Chromium or access production account data. They cover startup,
 launch errors, Windows argument parsing, isolated launch paths, extension
 arguments, existing Local State preservation, profile operations, account
 import/storage, lifecycle failures, process detection, multi-profile opening,
-and copy-only legacy-to-`profiles/` migration safeguards.
+copy-only legacy-to-`profiles/` migration safeguards, and application-owned
+metadata recovery/atomic-write safeguards.
 
 An additional opt-in test launches the real runtime in headless mode against a
 loopback HTTP fixture, using only disposable workspace profiles:

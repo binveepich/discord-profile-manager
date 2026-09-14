@@ -27,6 +27,7 @@ __pycache__/
 
 # Credentials and account data
 /config/accounts/
+/config/profiles.json
 *.secret
 *.secrets
 

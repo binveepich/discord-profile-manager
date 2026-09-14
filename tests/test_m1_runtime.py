@@ -43,11 +43,14 @@ class RuntimeTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.data = self.work / "legacy" / "data"
         self.profiles = self.work / "profiles"
+        self.config = self.work / "config"
         self.runtime = self.work / "browser" / "chrome.exe"
         self.extensions = self.work / "extensions"
         for name, value in {
             "DATA_DIR": self.data,
             "PROFILES_DIR": self.profiles,
+            "CONFIG_DIR": self.config,
+            "PROFILES_JSON": self.config / "profiles.json",
             "LOCAL_STATE": self.data / "Local State",
             "BROWSER_EXE": self.runtime,
             "EXT_DIR": self.extensions / "discord-autofill-extension",
@@ -100,6 +103,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(module.BROWSER_EXE, PROJECT_ROOT / "browser" / "chrome.exe")
         self.assertEqual(module.DATA_DIR, PROJECT_ROOT / "legacy" / "data")
         self.assertEqual(module.PROFILES_DIR, PROJECT_ROOT / "profiles")
+        self.assertEqual(module.CONFIG_DIR, PROJECT_ROOT / "config")
+        self.assertEqual(module.PROFILES_JSON, PROJECT_ROOT / "config" / "profiles.json")
         self.assertEqual(module.LOCAL_STATE, module.DATA_DIR / "Local State")
         self.assertEqual(module.LOG_DIR, PROJECT_ROOT / "legacy" / "log")
         self.assertEqual(module.EXT_DIR, PROJECT_ROOT / "extensions" / "discord-autofill-extension")
