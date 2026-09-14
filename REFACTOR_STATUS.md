@@ -2,8 +2,15 @@
 
 ## Current status
 
-R0 through R9 are complete on the isolated branch `refactor/revamped-parallel`.
-R10A is in progress. The stable entrypoint remains legacy and packaging remains locked.
+R0 through R10A are complete on the isolated branch `refactor/revamped-parallel`.
+
+AUTOMATED PARITY: PASS
+LEGACY DEFAULT: UNCHANGED
+REVAMPED: READY FOR MANUAL ACCEPTANCE
+DEFAULT SWITCH: BLOCKED PENDING USER APPROVAL
+PACKAGING: LOCKED
+
+The stable entrypoint remains legacy and packaging remains locked.
 
 ## Milestones
 
@@ -19,7 +26,7 @@ R10A is in progress. The stable entrypoint remains legacy and packaging remains 
 | R7 | COMPLETE | Disposable-root create/rename/delete/migration/recovery service and 14 lifecycle tests pass; lifecycle parity is PASS. |
 | R8 | COMPLETE | Headless cached table model, stable-ID selection, status polling, action controller, safe editor orchestration, and Tk rendering adapter pass 9 R8 tests. |
 | R9 | COMPLETE | Disposable-only composition, explicit service wiring, and safe startup refusal tests pass; root `main.py` remains untouched. |
-| R10A | TODO | Run automated parity audit; do not perform manual acceptance. |
+| R10A | COMPLETE | `verify_revamped.py`, frozen integrity, all synthetic compatibility categories, and all automated audit checks PASS. Manual acceptance remains user-owned. |
 
 ## Standing evidence
 

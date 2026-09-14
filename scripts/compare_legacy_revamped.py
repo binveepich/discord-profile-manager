@@ -5,6 +5,8 @@ opens live application data, launches Chromium, or prints fixture contents.
 """
 
 from pathlib import Path
+import copy
+import json
 import logging
 import sys
 import tempfile
@@ -44,6 +46,8 @@ def main():
         results["PATH POLICY"] = _compare_path_policy()
         results["ENVIRONMENT"] = _compare_environment()
         results["PROXY"] = _compare_proxy()
+        results["METADATA"] = _compare_metadata()
+        results["STORAGE"] = _compare_storage()
         results["LAUNCH ARGUMENTS"] = _compare_launch_arguments()
         results["PROFILE LIFECYCLE"] = _compare_profile_lifecycle()
         results["GUI MODEL"] = _compare_gui_model()
@@ -133,6 +137,80 @@ def _compare_path_policy():
             core.profile_path_from_metadata, "profiles/profile_0001", paths
         )
         return legacy_serialized == revamped_serialized and legacy_resolved == revamped_resolved
+
+
+def _valid_record():
+    return {
+        "profile_id": "profile_0001",
+        "display_name": "Synthetic",
+        "profile_directory": "profiles/profile_0001",
+        "created_at": "2026-09-11T00:00:00Z",
+        "last_opened_at": None,
+        "environment_preset": "default",
+        "proxy_enabled": False,
+    }
+
+
+def _compare_metadata():
+    with tempfile.TemporaryDirectory(prefix="compare-metadata-", dir=PROJECT_ROOT / "tmp") as name:
+        paths = core.ProjectPaths(Path(name))
+        legacy = _load_legacy()
+        _configure_legacy_paths(legacy, paths)
+        catalogs = [
+            {"version": 1, "profiles": []},
+            {"version": 1, "profiles": [_valid_record()]},
+            {"version": 1, "profiles": [_valid_record(), _valid_record()]},
+            {"version": 1, "profiles": [{**_valid_record(), "password": "synthetic"}]},
+            {"version": 1, "profiles": [{**_valid_record(), "profile_directory": "profiles/../outside"}]},
+        ]
+        for catalog in catalogs:
+            legacy_result = _outcome(legacy.ProfileMetadataManager._validate, copy.deepcopy(catalog))
+            revamped_result = _outcome(
+                __import__("revamped.storage", fromlist=["ProfileCatalogStore"]).ProfileCatalogStore._validate,
+                copy.deepcopy(catalog), paths,
+            )
+            if legacy_result[0] != revamped_result[0]:
+                return False
+        return True
+
+
+def _compare_storage():
+    with tempfile.TemporaryDirectory(prefix="compare-storage-", dir=PROJECT_ROOT / "tmp") as name:
+        paths = core.ProjectPaths(Path(name))
+        legacy = _load_legacy()
+        _configure_legacy_paths(legacy, paths)
+        legacy_store = legacy.LocalStateManager()
+        revamped_store = LegacyStateStore(paths)
+        states = [
+            {"profile": {"info_cache": {}}},
+            {"profile": {"info_cache": {
+                "Synthetic": {"name": "Synthetic", "created": 0}
+            }}},
+            {"profile": {"info_cache": {
+                "Synthetic": {"name": "Synthetic", "manager_path": "profile_0001", "created": 0},
+                "Other": {"name": "Other", "manager_path": "profile_0001", "created": 0},
+            }}},
+            {"profile": {"missing": {}}},
+        ]
+        for state in states:
+            if _outcome(legacy_store._validate, copy.deepcopy(state))[0] != _outcome(
+                revamped_store._validate, copy.deepcopy(state)
+            )[0]:
+                return False
+
+        legacy_empty = _outcome(legacy_store.load)
+        revamped_empty = _outcome(revamped_store.load)
+        if legacy_empty != revamped_empty:
+            return False
+
+        paths.data_dir.mkdir(parents=True, exist_ok=True)
+        paths.local_state.write_text("{malformed", encoding="utf-8")
+        legacy_bad = _outcome(legacy_store.load)
+        legacy_bytes = paths.local_state.read_bytes()
+        paths.local_state.unlink()
+        paths.local_state.write_text("{malformed", encoding="utf-8")
+        revamped_bad = _outcome(revamped_store.load)
+        return legacy_bad[0] == revamped_bad[0] and paths.local_state.read_bytes() == legacy_bytes
 
 
 def _compare_environment():

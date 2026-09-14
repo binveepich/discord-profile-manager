@@ -6,7 +6,7 @@ import unittest
 
 
 class R2ParityTests(unittest.TestCase):
-    def test_compare_script_reports_implemented_core_categories_only(self):
+    def test_compare_script_reports_all_implemented_categories(self):
         result = subprocess.run(
             [sys.executable, "-B", "scripts/compare_legacy_revamped.py"],
             capture_output=True,
@@ -17,7 +17,7 @@ class R2ParityTests(unittest.TestCase):
         self.assertIn("VALIDATION: PASS", result.stdout)
         self.assertIn("PATH POLICY: PASS", result.stdout)
         self.assertIn("ENVIRONMENT: PASS", result.stdout)
-        self.assertIn("LEGACY/REVAMPED PARITY: NOT IMPLEMENTED", result.stdout)
+        self.assertIn("LEGACY/REVAMPED PARITY: PASS", result.stdout)
 
 
 if __name__ == "__main__":
