@@ -2,8 +2,8 @@
 
 ## Current status
 
-R0 through R8 are complete on the isolated branch `refactor/revamped-parallel`.
-R9 is next. The stable entrypoint remains legacy and packaging remains locked.
+R0 through R9 are complete on the isolated branch `refactor/revamped-parallel`.
+R10A is in progress. The stable entrypoint remains legacy and packaging remains locked.
 
 ## Milestones
 
@@ -18,7 +18,7 @@ R9 is next. The stable entrypoint remains legacy and packaging remains locked.
 | R6 | COMPLETE | Extension source validation, staged deployment, account compatibility, secret-free logging, and R6 tests pass. |
 | R7 | COMPLETE | Disposable-root create/rename/delete/migration/recovery service and 14 lifecycle tests pass; lifecycle parity is PASS. |
 | R8 | COMPLETE | Headless cached table model, stable-ID selection, status polling, action controller, safe editor orchestration, and Tk rendering adapter pass 9 R8 tests. |
-| R9 | TODO | Add safe development composition after R8. |
+| R9 | COMPLETE | Disposable-only composition, explicit service wiring, and safe startup refusal tests pass; root `main.py` remains untouched. |
 | R10A | TODO | Run automated parity audit; do not perform manual acceptance. |
 
 ## Standing evidence
