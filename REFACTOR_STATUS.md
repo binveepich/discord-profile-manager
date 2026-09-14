@@ -2,8 +2,8 @@
 
 ## Current status
 
-R0 through R5 are complete on the isolated branch `refactor/revamped-parallel`.
-R6 is next. The stable entrypoint remains legacy and packaging remains locked.
+R0 through R6 are complete on the isolated branch `refactor/revamped-parallel`.
+R7 is in progress. The stable entrypoint remains legacy and packaging remains locked.
 
 ## Milestones
 
@@ -15,8 +15,8 @@ R6 is next. The stable entrypoint remains legacy and packaging remains locked.
 | R3 | COMPLETE | Environment/proxy policy and deterministic parity committed; R3 tests, frozen 170-test suite, and integrity gate PASS. |
 | R4 | COMPLETE | Catalog/legacy storage boundaries, locks, atomic writes, stale-write detection, and mirror restore committed; R4 tests, frozen 170-test suite, verify, and integrity PASS. |
 | R5 | COMPLETE | Injected process inspection, deterministic launcher assembly, launch failure handling, and launch parity committed; full 207-test suite, verify, compare, and integrity PASS. |
-| R6 | TODO | Add extension/account compatibility after R5. |
-| R7 | TODO | Add profile lifecycle after R6. |
+| R6 | COMPLETE | Extension source validation, staged deployment, account compatibility, secret-free logging, and R6 tests pass. |
+| R7 | IN_PROGRESS | Disposable-root profile lifecycle implementation and fault-injection tests are in progress. |
 | R8 | TODO | Add GUI model/controller after R7. |
 | R9 | TODO | Add safe development composition after R8. |
 | R10A | TODO | Run automated parity audit; do not perform manual acceptance. |
