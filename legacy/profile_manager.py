@@ -49,6 +49,10 @@ NEW_PROFILE_PATTERN = re.compile(r"^profile_(\d+)$", re.IGNORECASE)
 MANAGER_PATH_KEY = "manager_path"
 METADATA_VERSION = 1
 DEFAULT_ENVIRONMENT_PRESET = "default"
+PROFILE_TABLE_COLUMNS = (
+    "name", "account", "environment", "proxy", "status", "last_opened"
+)
+PROFILE_TABLE_DATA_COLUMNS = PROFILE_TABLE_COLUMNS + ("id",)
 
 # Ensure log directory exists
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -1678,9 +1682,9 @@ class ProfileManagerApp:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("Discord Accounts Manager [Based on Ungoogled Chromium]")
-        self.root.geometry("700x650")
-        self.root.minsize(700, 400)
+        self.root.title("Discord Profile Manager")
+        self.root.geometry("1100x650")
+        self.root.minsize(850, 450)
         self.root.configure(bg='#f0f0f0')
         
         # Initialize managers
@@ -1691,13 +1695,22 @@ class ProfileManagerApp:
         # Variables
         self.profiles = []          # list of (pid, name)
         self.current_profile = None
-        self.sort_method = tk.StringVar(value="name") 
+        self.selected_profile_ids = set()
+        self.sort_method = tk.StringVar(value="name")
+        self.sort_reverse = False
+        self.search_var = tk.StringVar()
+        self._search_after_id = None
+        self._status_after_id = None
+        self._profile_rows = []
+        self._closing = False
+        self.table_rows = []
         
         # Setup UI
         self.setup_ui()
         
         # Load profiles
         self.refresh_list()
+        self._schedule_status_poll()
         
         logger.info("Application started")
     
@@ -1711,6 +1724,21 @@ class ProfileManagerApp:
         left_frame = tk.Frame(main_frame, bg='#f0f0f0')
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         
+        # Search and sorting controls
+        search_frame = tk.Frame(left_frame, bg='#f0f0f0')
+        search_frame.pack(fill=tk.X, pady=(0, 5))
+
+        tk.Label(
+            search_frame,
+            text="Search:",
+            bg='#f0f0f0',
+            font=('Helvetica', 9, 'bold')
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        self.search_entry = tk.Entry(search_frame, textvariable=self.search_var)
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        self.search_var.trace_add("write", self._schedule_search_filter)
+
         # Sorting options
         sort_frame = tk.Frame(left_frame, bg='#f0f0f0')
         sort_frame.pack(fill=tk.X, pady=(0, 5))
@@ -1721,22 +1749,27 @@ class ProfileManagerApp:
         for text, value in [("Tên", "name"), ("ID", "id"), ("Mới nhất", "created"), ("Default đầu", "default_first")]:
             rb = tk.Radiobutton(sort_frame, text=text, variable=self.sort_method,
                                 value=value, bg='#f0f0f0',
-                                command=self.refresh_list)
+                                command=self.apply_search_filter)
             rb.pack(side=tk.LEFT, padx=5)
         
         # Profile treeview with scrollbar
         tree_frame = tk.Frame(left_frame, bg='#f0f0f0')
         tree_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Create Treeview with scrollbar
+        # Create Treeview with scrollbars
         scrollbar = tk.Scrollbar(tree_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        xscrollbar = tk.Scrollbar(tree_frame, orient=tk.HORIZONTAL)
+        xscrollbar.pack(side=tk.BOTTOM, fill=tk.X)
         
         self.tree = ttk.Treeview(
             tree_frame,
-            columns=("name", "id"),
+            columns=PROFILE_TABLE_DATA_COLUMNS,
+            displaycolumns=PROFILE_TABLE_COLUMNS,
             show="headings",  # Hide the default first empty column
             yscrollcommand=scrollbar.set,
+            xscrollcommand=xscrollbar.set,
             selectmode="extended",  # Enable multi-selection
             height=15
         )
@@ -1744,6 +1777,7 @@ class ProfileManagerApp:
         
         # Configure scrollbar
         scrollbar.config(command=self.tree.yview)
+        xscrollbar.config(command=self.tree.xview)
         
         # Configure columns
         self.tree.heading("name", text="Tên Profile")
@@ -1751,6 +1785,38 @@ class ProfileManagerApp:
         
         self.tree.column("name", width=300, anchor="w")
         self.tree.column("id", width=150, anchor="w")
+
+        headings = {
+            "name": "Name",
+            "account": "Account",
+            "environment": "Environment",
+            "proxy": "Proxy",
+            "status": "Status",
+            "last_opened": "Last Opened",
+            "id": "Profile ID",
+        }
+        widths = {
+            "name": 240,
+            "account": 220,
+            "environment": 105,
+            "proxy": 80,
+            "status": 100,
+            "last_opened": 155,
+            "id": 170,
+        }
+        self._id_column_index = PROFILE_TABLE_DATA_COLUMNS.index("id")
+        for column in PROFILE_TABLE_DATA_COLUMNS:
+            self.tree.heading(
+                column,
+                text=headings[column],
+                command=lambda selected_column=column: self.sort_by_column(selected_column)
+            )
+            self.tree.column(
+                column,
+                width=widths[column],
+                anchor="w",
+                stretch=column != "id"
+            )
         
         # Configure style for better appearance
         style = ttk.Style()
@@ -1816,7 +1882,7 @@ class ProfileManagerApp:
         ]
 
         for text, cmd, bg, activebg in manager_buttons:
-            tk.Button(
+            button = tk.Button(
                 manager_frame,
                 text=text,
                 command=cmd,
@@ -1825,7 +1891,17 @@ class ProfileManagerApp:
                 activebackground=activebg,
                 activeforeground='white',
                 **btn_style
-            ).pack(pady=3, fill=tk.X)
+            )
+            button.pack(pady=3, fill=tk.X)
+            button_names = {
+                "refresh_list": "btn_refresh",
+                "select_all_profiles": "btn_select_all",
+                "deselect_all_selection": "btn_deselect_all",
+                "bulk_import_profiles": "btn_import_profiles",
+            }
+            attribute = button_names.get(getattr(cmd, "__name__", ""))
+            if attribute:
+                setattr(self, attribute, button)
 
         # ===== PROFILE ACTIONS =====
         profile_frame = tk.LabelFrame(
@@ -1839,13 +1915,14 @@ class ProfileManagerApp:
         profile_frame.pack(fill=tk.X, pady=(0, 8))
         
         profile_buttons = [
+            ("Edit", self.edit_profile, '#6C757D', '#545B62'),
             ("✨ Tạo Profile", self.create_profile, '#0078D7', '#0053A0'),
             ("✏️ Đổi tên", self.rename_profile, '#28A745', '#1E7E34'),
             ("🗑️ Xóa", self.delete_profile, '#DC3545', '#BD2130'),
         ]
         
         for text, cmd, bg, activebg in profile_buttons:
-            tk.Button(
+            button = tk.Button(
                 profile_frame,
                 text=text,
                 command=cmd,
@@ -1854,7 +1931,17 @@ class ProfileManagerApp:
                 activebackground=activebg,
                 activeforeground='white',
                 **btn_style
-            ).pack(pady=3, fill=tk.X)
+            )
+            button.pack(pady=3, fill=tk.X)
+            button_names = {
+                "create_profile": "btn_create_profile",
+                "rename_profile": "btn_rename_profile",
+                "delete_profile": "btn_delete_profile",
+                "edit_profile": "btn_edit_profile",
+            }
+            attribute = button_names.get(getattr(cmd, "__name__", ""))
+            if attribute:
+                setattr(self, attribute, button)
         
         # ===== ACCOUNT ACTIONS =====
         account_frame = tk.LabelFrame(
@@ -1923,20 +2010,331 @@ class ProfileManagerApp:
         self.tree.bind("<Double-Button-1>", lambda e: self.open_discord())
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
 
+    @staticmethod
+    def _value(value, default=""):
+        """Read a Tk variable or return a plain value for test doubles."""
+        if hasattr(value, "get"):
+            return value.get()
+        return default if value is None else value
+
+    def _display_environment(self, record):
+        preset = record.get("environment_preset") or DEFAULT_ENVIRONMENT_PRESET
+        if str(preset).casefold() == DEFAULT_ENVIRONMENT_PRESET:
+            return "Default"
+        return str(preset).replace("_", " ").title()
+
+    @staticmethod
+    def _display_proxy(record):
+        return "On" if bool(record.get("proxy_enabled", False)) else "Off"
+
+    @staticmethod
+    def _display_last_opened(value):
+        if not value:
+            return "Never"
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone()
+            return parsed.strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError, OverflowError):
+            return str(value)
+
+    def _account_identifier(self, profile_id):
+        """Return the only account field safe for the profile table."""
+        try:
+            account = self.account_manager.get_account(profile_id)
+            email = account.get("email") if isinstance(account, dict) else None
+            return str(email) if email else "—"
+        except (AttributeError, KeyError, ProfileManagerError, OSError, TypeError):
+            return "—"
+
+    def _profile_status(self, profile_id):
+        """Report live browser state without inferring it from metadata."""
+        try:
+            profile_dir = Path(self.profile_manager.get_profile_dir(profile_id))
+            return self._profile_status_from_directory(profile_dir)
+        except (AttributeError, OSError, ProfileManagerError, TypeError, ValueError):
+            return "Unknown"
+
+    @staticmethod
+    def _profile_status_from_directory(profile_dir):
+        """Check one cached profile directory without loading profile metadata."""
+        try:
+            profile_dir = Path(profile_dir)
+            if not profile_dir.is_dir():
+                return "Missing"
+            return "Open" if browser_using_directory(profile_dir) else "Closed"
+        except (OSError, TypeError, ValueError, ProfileManagerError):
+            return "Unknown"
+
+    def _build_profile_row(self, record):
+        profile_id = str(record.get("profile_id", ""))
+        display_name = str(record.get("display_name") or profile_id)
+        last_opened_at = record.get("last_opened_at")
+        try:
+            profile_path = Path(self.profile_manager.get_profile_dir(profile_id))
+            status = self._profile_status_from_directory(profile_path)
+        except (AttributeError, OSError, ProfileManagerError, TypeError, ValueError):
+            profile_path = None
+            status = "Unknown"
+        return {
+            "profile_id": profile_id,
+            "display_name": display_name,
+            "account": self._account_identifier(profile_id),
+            "environment": self._display_environment(record),
+            "proxy": self._display_proxy(record),
+            "status": status,
+            "profile_path": str(profile_path) if profile_path is not None else None,
+            "last_opened": self._display_last_opened(last_opened_at),
+            "created_at": str(record.get("created_at") or ""),
+            "last_opened_sort": str(last_opened_at or ""),
+        }
+
+    def sort_by_column(self, column):
+        """Sort the visible table without changing profile metadata."""
+        sort_method = "last_opened" if column == "last_opened" else column
+        if self._value(self.sort_method) == sort_method:
+            self.sort_reverse = not getattr(self, "sort_reverse", False)
+        else:
+            if hasattr(self.sort_method, "set"):
+                self.sort_method.set(sort_method)
+            else:
+                self.sort_method = sort_method
+            self.sort_reverse = False
+        self.apply_search_filter()
+
+    def _cancel_scheduled_callback(self, attribute):
+        callback_id = getattr(self, attribute, None)
+        if callback_id is None:
+            return
+        try:
+            self.root.after_cancel(callback_id)
+        except (AttributeError, RuntimeError, tk.TclError):
+            pass
+        setattr(self, attribute, None)
+
+    def _schedule_search_filter(self, *_):
+        """Debounce typing and filter the current in-memory dataset only."""
+        if getattr(self, "_closing", False):
+            return
+        self._cancel_scheduled_callback("_search_after_id")
+        search = str(self._value(getattr(self, "search_var", ""))).strip()
+        if not search:
+            self.apply_search_filter()
+            return
+        try:
+            self._search_after_id = self.root.after(200, self._run_search_filter)
+        except (AttributeError, RuntimeError, tk.TclError):
+            self._search_after_id = None
+
+    def _run_search_filter(self):
+        self._search_after_id = None
+        if not getattr(self, "_closing", False):
+            self.apply_search_filter()
+
+    def _sorted_profile_rows(self, rows):
+        """Return a sorted view of cached rows without changing the row data."""
+        rows = list(rows)
+        sort_by = self._value(getattr(self, "sort_method", "name"), "name")
+        sort_reverse = bool(getattr(self, "sort_reverse", False))
+        if sort_by == "created":
+            rows.sort(key=lambda row: row["created_at"], reverse=not sort_reverse)
+        elif sort_by == "default_first":
+            rows.sort(
+                key=lambda row: (
+                    row["profile_id"] != "Default",
+                    row["display_name"].casefold()
+                ),
+                reverse=sort_reverse
+            )
+        else:
+            sort_field = sort_by if sort_by in {
+                "name", "id", "account", "environment", "proxy", "status", "last_opened"
+            } else "name"
+            key_field = {"name": "display_name", "id": "profile_id"}.get(
+                sort_field, sort_field
+            )
+            if key_field == "last_opened":
+                key_field = "last_opened_sort"
+            rows.sort(
+                key=lambda row: str(row[key_field]).casefold(),
+                reverse=sort_reverse
+            )
+        return rows
+
+    def _filtered_profile_rows(self):
+        search = str(self._value(getattr(self, "search_var", ""))).strip().casefold()
+        rows = list(getattr(self, "_profile_rows", []))
+        if not search:
+            return rows
+        return [
+            row for row in rows
+            if any(search in str(row[field]).casefold() for field in (
+                "profile_id", "display_name", "account", "environment",
+                "proxy", "status", "last_opened"
+            ))
+        ]
+
+    def apply_search_filter(self):
+        """Apply search and sorting to cached rows without a full refresh."""
+        if getattr(self, "_closing", False):
+            return
+        rows = self._sorted_profile_rows(self._filtered_profile_rows())
+        self._render_profile_rows(rows)
+
+    def _render_profile_rows(self, rows):
+        selected_ids = set(getattr(self, "selected_profile_ids", set()))
+        if hasattr(self, "tree"):
+            selected_ids.update(pid for pid, _ in self.get_selected_profiles())
+        all_profile_ids = {
+            row["profile_id"] for row in getattr(self, "_profile_rows", [])
+        }
+        if all_profile_ids:
+            selected_ids.intersection_update(all_profile_ids)
+        visible_ids = {row["profile_id"] for row in rows}
+        hidden_selected = selected_ids - visible_ids
+
+        self.table_rows = list(rows)
+        self.profiles = [
+            (row["profile_id"], row["display_name"])
+            for row in rows
+        ]
+        if not hasattr(self, "tree"):
+            return
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for row in rows:
+            self.tree.insert(
+                "",
+                "end",
+                iid=row["profile_id"],
+                values=(
+                    row["display_name"],
+                    row["account"],
+                    row["environment"],
+                    row["proxy"],
+                    row["status"],
+                    row["last_opened"],
+                    row["profile_id"],
+                )
+            )
+
+        visible_selected = [
+            row["profile_id"] for row in rows
+            if row["profile_id"] in selected_ids
+        ]
+        if visible_selected:
+            self.tree.selection_set(visible_selected)
+        self.on_select(None)
+        self.selected_profile_ids.update(hidden_selected)
+
+    def _refresh_cached_statuses(self):
+        """Update only process status using paths cached by the last full refresh."""
+        changed = False
+        for row in getattr(self, "_profile_rows", []):
+            status = self._profile_status_from_directory(row.get("profile_path"))
+            if row.get("status") != status:
+                row["status"] = status
+                changed = True
+        if not changed or not hasattr(self, "tree"):
+            return
+
+        visible_rows = {
+            row["profile_id"]: row for row in getattr(self, "table_rows", [])
+        }
+        status_index = PROFILE_TABLE_DATA_COLUMNS.index("status")
+        for item in self.tree.get_children():
+            row = visible_rows.get(item)
+            if row is None:
+                continue
+            values = list(self.tree.item(item, "values"))
+            if len(values) <= status_index:
+                continue
+            values[status_index] = row["status"]
+            self.tree.item(item, values=tuple(values))
+
+    def _poll_status(self):
+        self._status_after_id = None
+        if getattr(self, "_closing", False):
+            return
+        try:
+            self._refresh_cached_statuses()
+        except Exception:
+            logger.warning("Profile status polling failed")
+        finally:
+            self._schedule_status_poll()
+
+    def _schedule_status_poll(self):
+        if getattr(self, "_closing", False):
+            return
+        try:
+            self._status_after_id = self.root.after(1500, self._poll_status)
+        except (AttributeError, RuntimeError, tk.TclError):
+            self._status_after_id = None
+
+    def shutdown(self):
+        """Cancel GUI callbacks before the root window is destroyed."""
+        self._closing = True
+        self._cancel_scheduled_callback("_search_after_id")
+        self._cancel_scheduled_callback("_status_after_id")
+
+    def _set_button_state(self, attribute, state):
+        button = getattr(self, attribute, None)
+        if button is not None:
+            button.config(state=state)
+
+    def update_action_buttons(self):
+        """Keep primary actions truthful for the current selection."""
+        selected_count = len(self.get_selected_profiles()) if hasattr(self, "tree") else 0
+        row_count = len(getattr(self, "profiles", []))
+        self._set_button_state("btn_open_discord", tk.NORMAL if selected_count else tk.DISABLED)
+        self._set_button_state("btn_rename_profile", tk.NORMAL if selected_count == 1 else tk.DISABLED)
+        self._set_button_state("btn_edit_profile", tk.NORMAL if selected_count == 1 else tk.DISABLED)
+        self._set_button_state("btn_delete_profile", tk.NORMAL if selected_count else tk.DISABLED)
+        self._set_button_state("btn_select_all", tk.NORMAL if row_count else tk.DISABLED)
+        self._set_button_state("btn_deselect_all", tk.NORMAL if selected_count else tk.DISABLED)
+
+    def edit_profile(self):
+        """Open the existing account editor/viewer for the selected profile."""
+        profile = self.get_selected_profile()
+        if not profile:
+            return
+        profile_id, _ = profile
+        try:
+            account = self.account_manager.get_account(profile_id)
+            if account:
+                self.view_account()
+            else:
+                self.set_account_for_profile(profile_id)
+        except (AttributeError, ProfileManagerError, OSError) as error:
+            messagebox.showerror("Error", f"Could not edit profile account:\n{error}")
+
     def select_all_profiles(self):
         """Select all items in treeview"""
         for item in self.tree.get_children():
             self.tree.selection_add(item)
+        self.on_select(None)
 
     def deselect_all_selection(self):
         """deselect_all all selections"""
         self.tree.selection_remove(self.tree.selection())
+        self.selected_profile_ids = set()
+        self.on_select(None)
 
     def get_next_bulk_index(self):
         """Find next 4-digit index based on existing profile names"""
         max_index = 0
 
-        for _, name in self.profiles:
+        try:
+            names = [
+                record.get("display_name", "")
+                for record in self.profile_manager.get_profile_metadata()
+            ]
+        except (AttributeError, ProfileManagerError, OSError, TypeError):
+            names = [name for _, name in self.profiles]
+
+        for name in names:
             match = re.match(r"^(\d{4}) \|", name)
             if match:
                 num = int(match.group(1))
@@ -2012,35 +2410,37 @@ class ProfileManagerApp:
         """Enable/disable account buttons based on selected profile"""
 
         if not self.current_profile:
-            self.btn_set_account.config(state=tk.DISABLED)
-            self.btn_view_account.config(state=tk.DISABLED)
-            self.btn_remove_account.config(state=tk.DISABLED)
+            self._set_button_state("btn_set_account", tk.DISABLED)
+            self._set_button_state("btn_view_account", tk.DISABLED)
+            self._set_button_state("btn_remove_account", tk.DISABLED)
             return
 
         pid, _ = self.current_profile
         try:
             account = self.account_manager.get_account(pid)
-        except (ProfileManagerError, OSError):
-            self.btn_set_account.config(state=tk.DISABLED)
-            self.btn_view_account.config(state=tk.DISABLED)
-            self.btn_remove_account.config(state=tk.DISABLED)
+        except (AttributeError, ProfileManagerError, OSError):
+            self._set_button_state("btn_set_account", tk.DISABLED)
+            self._set_button_state("btn_view_account", tk.DISABLED)
+            self._set_button_state("btn_remove_account", tk.DISABLED)
             return
 
         if account:
             # Có account
-            self.btn_set_account.config(state=tk.DISABLED)
-            self.btn_view_account.config(state=tk.NORMAL)
-            self.btn_remove_account.config(state=tk.NORMAL)
+            self._set_button_state("btn_set_account", tk.DISABLED)
+            self._set_button_state("btn_view_account", tk.NORMAL)
+            self._set_button_state("btn_remove_account", tk.NORMAL)
         else:
             # Chưa có account
-            self.btn_set_account.config(state=tk.NORMAL)
-            self.btn_view_account.config(state=tk.DISABLED)
-            self.btn_remove_account.config(state=tk.DISABLED)
+            self._set_button_state("btn_set_account", tk.NORMAL)
+            self._set_button_state("btn_view_account", tk.DISABLED)
+            self._set_button_state("btn_remove_account", tk.DISABLED)
 
     def on_select(self, event):
         selected = self.get_selected_profiles()
         self.current_profile = selected[0] if len(selected) == 1 else None
+        self.selected_profile_ids = {profile_id for profile_id, _ in selected}
         self.update_account_buttons()
+        self.update_action_buttons()
 
     def get_selected_profiles(self):
         """Resolve selection by stable IDs, independently of row labels/icons."""
@@ -2049,9 +2449,14 @@ class ProfileManagerApp:
         seen = set()
         for item in self.tree.selection():
             values = self.tree.item(item, 'values')
-            if len(values) >= 2 and values[1] in names and values[1] not in seen:
-                selected.append((values[1], names[values[1]]))
-                seen.add(values[1])
+            id_index = getattr(self, "_id_column_index", 1)
+            profile_id = values[id_index] if len(values) > id_index else None
+            # M1-M4 test doubles and older callers used a two-column table.
+            if profile_id not in names and len(values) >= 2:
+                profile_id = values[1]
+            if profile_id in names and profile_id not in seen:
+                selected.append((profile_id, names[profile_id]))
+                seen.add(profile_id)
         return selected
     
     def get_selected_profile(self):
@@ -2075,59 +2480,32 @@ class ProfileManagerApp:
         logger.info(f"Status: {message}")
     
     def refresh_list(self):
-        """Refresh profile list with current sorting"""
-        self.update_status("Đang tải danh sách profile...")
-        
+        """Reload metadata and rebuild the cached profile display dataset."""
+        self.update_status("Loading profiles...")
+
         try:
-            selected_ids = {pid for pid, _ in self.get_selected_profiles()}
-            # Application metadata is the primary list; Chromium Local State
-            # remains internal browser data and the legacy registry is only a
-            # compatibility mirror.
-            raw_profiles = [
-                (record['profile_id'], record['display_name'], record['created_at'])
+            # This is the only path that reloads metadata and builds static row data.
+            self._profile_rows = [
+                self._build_profile_row(record)
                 for record in self.profile_manager.get_profile_metadata()
             ]
-            
-            # Sort according to selected method
-            sort_by = self.sort_method.get()
-            if sort_by == "name":
-                raw_profiles.sort(key=lambda x: x[1].lower())
-            elif sort_by == "id":
-                raw_profiles.sort(key=lambda x: x[0])
-            elif sort_by == "created":
-                raw_profiles.sort(key=lambda x: x[2], reverse=True)
-            elif sort_by == "default_first":
-                default = [p for p in raw_profiles if p[0] == "Default"]
-                others = [p for p in raw_profiles if p[0] != "Default"]
-                others.sort(key=lambda x: x[1].lower())
-                raw_profiles = default + others
-            
-            # Store only (pid, name) for later use
-            self.profiles = [(p[0], p[1]) for p in raw_profiles]
-            
-            # deselect_all treeview and repopulate
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            
-            for pid, name in self.profiles:
-                prefix = "⭐" if pid == "Default" else "👤"
-                self.tree.insert("", "end", iid=pid, values=(f"{prefix} {name}", pid))
-
-            self.tree.selection_set([pid for pid, _ in self.profiles if pid in selected_ids])
-            self.on_select(None)
-            
-            self.update_status(f"Đã tải {len(self.profiles)} profiles")
-            
-        except Exception as e:
+            self.apply_search_filter()
+            self.update_status(f"Loaded {len(self.profiles)} profiles")
+        except Exception as error:
+            self._profile_rows = []
             self.profiles = []
+            self.table_rows = []
+            self.selected_profile_ids = set()
             self.current_profile = None
-            for item in self.tree.get_children():
-                self.tree.delete(item)
+            if hasattr(self, "tree"):
+                for item in self.tree.get_children():
+                    self.tree.delete(item)
             self.update_account_buttons()
-            logger.error(f"Failed to refresh list: {e}")
-            messagebox.showerror("Lỗi", f"Không thể tải profiles:\n{e}")
-            self.update_status("Lỗi tải danh sách")
-    
+            self.update_action_buttons()
+            logger.error(f"Failed to refresh list: {error}")
+            messagebox.showerror("Error", f"Could not load profiles:\n{error}")
+            self.update_status("Profile list error")
+
     def create_profile(self):
         """Create new profile"""
         name = simpledialog.askstring(
@@ -2147,6 +2525,9 @@ class ProfileManagerApp:
             
             # Refresh list
             self.refresh_list()
+            if hasattr(self, "tree") and hasattr(self.tree, "exists") and self.tree.exists(new_id):
+                self.tree.selection_set(new_id)
+                self.on_select(None)
             
             # Ask to set account
             if messagebox.askyesno("Thành công", f"Profile {new_id} đã được tạo.\n\nThiết lập tài khoản Discord ngay?"):
@@ -2238,6 +2619,13 @@ class ProfileManagerApp:
             except Exception as error:
                 logger.error(f'Launch failed for {pid}: {error}')
                 errors.append(f'{pid}: {error}')
+        # Refresh live process state after launch requests.  Launch failures
+        # remain reported even when a status refresh is unavailable.
+        if hasattr(self, "tree"):
+            try:
+                self.refresh_list()
+            except Exception:
+                pass
         self.update_status(f'Launch requested: {requested}; already running: {running}; failed: {len(errors)}')
         if errors:
             messagebox.showerror('Could not open some profiles', '\n\n'.join(errors[:10]))
@@ -2409,6 +2797,7 @@ class ProfileManagerApp:
         try:
             self.update_status(f"Đang cấu hình tài khoản cho {profile_id}...")
             self.account_manager.set_account(profile_id, account_string)
+            self.refresh_list()
             self.update_status(f"Đã cấu hình tài khoản cho {profile_id}")
             messagebox.showinfo("Thành công", "Đã cấu hình tài khoản thành công!")
             self.update_account_buttons()
@@ -2646,6 +3035,7 @@ def main():
         # Handle window close
         def on_closing():
             logger.info("Application shutting down")
+            app.shutdown()
             root.destroy()
         
         root.protocol("WM_DELETE_WINDOW", on_closing)
