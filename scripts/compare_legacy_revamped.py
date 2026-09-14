@@ -18,6 +18,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from revamped import core, environment, proxy
+from revamped.profiles import ProfileService
+from revamped.processes import ChromiumProcessInspector
+from revamped.storage import LegacyStateStore
 
 
 CATEGORIES = (
@@ -41,6 +44,7 @@ def main():
         results["ENVIRONMENT"] = _compare_environment()
         results["PROXY"] = _compare_proxy()
         results["LAUNCH ARGUMENTS"] = _compare_launch_arguments()
+        results["PROFILE LIFECYCLE"] = _compare_profile_lifecycle()
     except Exception:
         # A comparison failure is reported as FAIL, without exposing paths or
         # exception text that might contain local data.
@@ -233,6 +237,94 @@ def _compare_launch_arguments():
         )
         revamped.launch_discord(profile_id)
         return legacy_command == revamped_popen.call_args.args[0]
+
+
+def _configure_legacy_paths(legacy, paths):
+    for attribute, value in {
+        "PROJECT_ROOT": paths.root,
+        "BROWSER_EXE": paths.browser_exe,
+        "DATA_DIR": paths.data_dir,
+        "PROFILES_DIR": paths.profiles_dir,
+        "CONFIG_DIR": paths.config_dir,
+        "PROFILES_JSON": paths.profiles_json,
+        "LOCAL_STATE": paths.local_state,
+        "LOG_DIR": paths.legacy_log_dir,
+        "EXTENSIONS_DIR": paths.extensions_dir,
+        "EXT_DIR": paths.autofill_extension_dir,
+    }.items():
+        setattr(legacy, attribute, value)
+
+
+def _seed_legacy_profile(paths, store, profile_id="Legacy 1"):
+    state = store.load()
+    store.save(state)
+    browser_profile = paths.data_dir / profile_id / "Default"
+    browser_profile.mkdir(parents=True)
+    (browser_profile / "Preferences").write_text(
+        '{"profile": {"name": "synthetic"}}', encoding="utf-8"
+    )
+    state = store.load()
+    state["profile"]["info_cache"][profile_id] = {"name": "Legacy", "created": 0}
+    store.save(state)
+
+
+def _compare_profile_lifecycle():
+    with tempfile.TemporaryDirectory(prefix="compare-lifecycle-", dir=PROJECT_ROOT / "tmp") as legacy_name, tempfile.TemporaryDirectory(
+        prefix="compare-lifecycle-", dir=PROJECT_ROOT / "tmp"
+    ) as revamped_name:
+        legacy_paths = core.ProjectPaths(Path(legacy_name))
+        legacy = _load_legacy()
+        _configure_legacy_paths(legacy, legacy_paths)
+        with patch.object(legacy.psutil, "process_iter", return_value=[]):
+            legacy_manager = legacy.ProfileManager()
+            legacy_id = legacy_manager.create_profile("Compare")
+            legacy_dir = legacy_manager.get_profile_dir(legacy_id)
+            legacy_manager.rename_profile(legacy_id, "Renamed")
+            legacy_result = (
+                legacy_id,
+                legacy_manager.get_profiles(),
+                legacy_dir.relative_to(legacy_paths.root).as_posix(),
+            )
+
+        revamped_paths = core.ProjectPaths(Path(revamped_name))
+        revamped_service = ProfileService(
+            revamped_paths,
+            process_inspector=ChromiumProcessInspector(process_iter=lambda *_: []),
+        )
+        revamped_id = revamped_service.create_profile("Compare")
+        revamped_dir = revamped_service.get_profile_dir(revamped_id)
+        revamped_service.rename_profile(revamped_id, "Renamed")
+        revamped_result = (
+            revamped_id,
+            revamped_service.get_profiles(),
+            revamped_dir.relative_to(revamped_paths.root).as_posix(),
+        )
+        if legacy_result != revamped_result:
+            return False
+
+        legacy_migration_paths = core.ProjectPaths(Path(legacy_name) / "migration")
+        legacy_migration = _load_legacy()
+        _configure_legacy_paths(legacy_migration, legacy_migration_paths)
+        legacy_store = legacy_migration.LocalStateManager()
+        _seed_legacy_profile(legacy_migration_paths, legacy_store)
+        with patch.object(legacy_migration.psutil, "process_iter", return_value=[]):
+            legacy_migration_id = legacy_migration.ProfileManager().migrate_profile("Legacy 1")
+
+        revamped_migration_paths = core.ProjectPaths(Path(revamped_name) / "migration")
+        revamped_store = LegacyStateStore(revamped_migration_paths)
+        _seed_legacy_profile(revamped_migration_paths, revamped_store)
+        revamped_migration = ProfileService(
+            revamped_migration_paths,
+            process_inspector=ChromiumProcessInspector(process_iter=lambda *_: []),
+        )
+        revamped_migration_id = revamped_migration.migrate_profile("Legacy 1")
+        return (
+            legacy_migration_id == revamped_migration_id
+            and (legacy_migration_paths.data_dir / "Legacy 1").is_dir()
+            and (revamped_migration_paths.data_dir / "Legacy 1").is_dir()
+            and (legacy_migration_paths.profiles_dir / legacy_migration_id).is_dir()
+            and (revamped_migration_paths.profiles_dir / revamped_migration_id).is_dir()
+        )
 
 
 if __name__ == "__main__":
