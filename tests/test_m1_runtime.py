@@ -54,7 +54,6 @@ class RuntimeTests(unittest.TestCase):
             "LOCAL_STATE": self.data / "Local State",
             "BROWSER_EXE": self.runtime,
             "EXT_DIR": self.extensions / "discord-autofill-extension",
-            "TOKEN_EXT_DIR": self.extensions / "discord-token-extractor-extension",
         }.items():
             self.stack.enter_context(patch.object(self.manager, name, value))
         self.popen = self.stack.enter_context(patch.object(self.manager.subprocess, "Popen"))
@@ -107,8 +106,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(module.PROFILES_JSON, PROJECT_ROOT / "config" / "profiles.json")
         self.assertEqual(module.LOCAL_STATE, module.DATA_DIR / "Local State")
         self.assertEqual(module.LOG_DIR, PROJECT_ROOT / "legacy" / "log")
+        self.assertEqual(module.EXTENSIONS_DIR, PROJECT_ROOT / "extensions")
         self.assertEqual(module.EXT_DIR, PROJECT_ROOT / "extensions" / "discord-autofill-extension")
-        self.assertEqual(module.TOKEN_EXT_DIR.parent, PROJECT_ROOT / "extensions")
 
     def test_project_path_with_spaces_and_unicode(self):
         project = self.work / "Project with spaces Thử nghiệm"
@@ -290,9 +289,6 @@ class RuntimeTests(unittest.TestCase):
     def test_gui_launch_collects_existing_profile_extension_copies(self):
         self.make_runtime()
         self.make_autofill_source()
-        # An inert optional-extension fixture; no real extension code is executed.
-        self.manager.TOKEN_EXT_DIR.mkdir(parents=True)
-        (self.manager.TOKEN_EXT_DIR / "manifest.json").write_text('{"manifest_version": 3}', encoding="utf-8")
         profiles = self.make_profiles()
         pid = profiles.create_profile("Extension test")
         accounts = self.manager.AccountManager(profiles)
@@ -305,7 +301,7 @@ class RuntimeTests(unittest.TestCase):
         with patch.object(self.manager.messagebox, "showerror") as showerror:
             app.open_discord()
         showerror.assert_not_called()
-        self.assertEqual(len(installed), 2)
+        self.assertEqual(len(installed), 1)
         self.assertEqual(self.popen.call_args.args[0][-1], "--load-extension=" + ",".join(map(str, installed)))
 
     @unittest.skipUnless(sys.platform == "win32", "Native Windows argument parsing")

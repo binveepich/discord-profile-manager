@@ -23,7 +23,7 @@ or is a directory instead of a file, startup displays the expected full path and
 returns after the error dialog is dismissed. A missing runtime encountered when
 opening a profile uses the existing GUI error dialog.
 
-## M1/M2/M3/M4 storage compatibility
+## M1/M2/M3/M4/M5 storage compatibility
 
 - Application-owned profile metadata is stored at `config/profiles.json` with a
   versioned `profiles` list. It contains profile IDs, display names, relative
@@ -43,16 +43,32 @@ opening a profile uses the existing GUI error dialog.
   compatibility mirror only after the copy succeeds, and leaves the legacy
   source in place. A failed copy or metadata update leaves the source untouched
   and reports the paths involved.
-- Extension sources are read from root `extensions/` and copied into each
-  profile's `Unpacked Extensions/` directory by the existing account workflow.
-  Existing per-profile extension copies and account configuration are retained.
+- The supported extension source is discovered under root `extensions/`.
+  `manifest.json`, `config.js`, and files declared by the manifest are validated
+  before deployment.
+- Because the current content-script design embeds profile-specific account
+  configuration in `config.js`, each profile keeps its own unpacked deployment
+  under `Unpacked Extensions/`. Reusable source files are refreshed from the
+  root source while the profile's existing `config.js` is preserved.
 - Each launch keeps the existing launch flags, extension arguments, and Discord
   URL while selecting the resolved legacy or managed user-data root.
 
-M4 does not implement environment emulation, mobile behavior, proxy networking,
-an updater, credential redesign, or GUI/module migration. Legacy profile data,
-managed profiles, and logs remain excluded from Git. Chromium runtime files are
-unchanged.
+M5 does not implement environment emulation, mobile behavior, proxy networking, an
+updater, credential redesign, GUI/module migration, or a plugin framework. Legacy
+profile data, managed profiles, and logs remain excluded from Git. Chromium runtime
+files are unchanged.
+
+## M5 extension behavior
+
+- Account setup deploys the supported autofill extension using a staged copy, then
+  writes only the selected profile's `config.js`.
+- Existing profile deployments are compatible across manager restarts. Missing or
+  invalid optional deployments are skipped during launch so browser profile data
+  remains usable; account setup reports source/deployment errors clearly.
+- Source updates replace reusable extension files without sharing account
+  configuration between profiles. Extra profile-local extension files are retained.
+- Account import continues to create isolated browser roots and isolated extension
+  configuration for each imported synthetic account.
 
 When `config/profiles.json` is missing or empty, the manager imports registered
 M1-M3 profiles and discovers valid existing managed profile roots without

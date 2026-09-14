@@ -78,7 +78,7 @@ async function autofill2FA() {
         setReactInputValue(otpInput, code);
 
         is2FAFilled = true;
-        console.log("2FA Autofilled:", code);
+        console.log("2FA Autofilled");
 
     } catch (err) {
         console.error("2FA autofill error:", err);

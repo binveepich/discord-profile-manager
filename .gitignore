@@ -31,9 +31,6 @@ __pycache__/
 *.secret
 *.secrets
 
-# Unsafe local-only extension component; do not publish token extraction code.
-/extensions/discord-token-extractor-extension/
-
 # Temporary files
 /tmp/
 /temp/

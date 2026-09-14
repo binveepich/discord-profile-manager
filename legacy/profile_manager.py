@@ -39,8 +39,10 @@ PROFILES_JSON = CONFIG_DIR / "profiles.json"
 DATA_DIR = BASE_DIR / "data"
 PROFILES_DIR = PROJECT_ROOT / "profiles"
 LOG_DIR = BASE_DIR / "log"
-EXT_DIR = PROJECT_ROOT / "extensions" / "discord-autofill-extension"
-TOKEN_EXT_DIR = PROJECT_ROOT / "extensions" / "discord-token-extractor-extension"
+EXTENSIONS_DIR = PROJECT_ROOT / "extensions"
+AUTOFILL_EXTENSION_NAME = "discord-autofill-extension"
+EXT_DIR = EXTENSIONS_DIR / AUTOFILL_EXTENSION_NAME
+PROFILE_EXTENSIONS_DIR_NAME = "Unpacked Extensions"
 LOCAL_STATE = DATA_DIR / "Local State"
 
 NEW_PROFILE_PATTERN = re.compile(r"^profile_(\d+)$", re.IGNORECASE)
@@ -74,8 +76,16 @@ class ProfileNotFoundError(ProfileManagerError):
     """Profile not found in Local State"""
     pass
 
-class ExtensionNotFoundError(ProfileManagerError):
-    """Discord autofill extension not found"""
+class ExtensionError(ProfileManagerError):
+    """Base error for extension discovery and deployment."""
+    pass
+
+class ExtensionNotFoundError(ExtensionError):
+    """Discord autofill extension source is not available."""
+    pass
+
+class ExtensionDeploymentError(ExtensionError):
+    """A profile extension deployment could not be completed safely."""
     pass
 
 class InvalidAccountFormatError(ProfileManagerError):
@@ -1160,69 +1170,241 @@ class ProfileManager:
 # ----------------------------------------------------------------------
 # Extension and Account Management
 # ----------------------------------------------------------------------
+class ExtensionManager:
+    """Discover and safely deploy the supported unpacked extension."""
+
+    def __init__(self, profile_manager):
+        self.profile_manager = profile_manager
+
+    @staticmethod
+    def _source_root():
+        # Derive the root from EXT_DIR so tests and portable copies can replace
+        # the source location without introducing an absolute path dependency.
+        return Path(EXT_DIR).parent
+
+    @staticmethod
+    def _profile_extensions_dir(profile_dir):
+        return checked_path(
+            Path(profile_dir) / PROFILE_EXTENSIONS_DIR_NAME,
+            profile_dir,
+        )
+
+    @staticmethod
+    def _declared_file(extension_dir, relative_name, description):
+        if not isinstance(relative_name, str) or not relative_name.strip():
+            raise ExtensionError(f"{description} declares an invalid file path.")
+        relative = PureWindowsPath(relative_name.replace('/', '\\'))
+        if relative.is_absolute() or relative.drive or any(
+                part in ('', '.', '..') for part in relative.parts):
+            raise ExtensionError(f"{description} declares an unsafe file path.")
+        candidate = checked_path(extension_dir.joinpath(*relative.parts), extension_dir)
+        if not candidate.is_file():
+            raise ExtensionError(f"{description} is missing {relative_name}.")
+        return candidate
+
+    @classmethod
+    def _validate_extension_directory(cls, extension_dir, description):
+        extension_dir = Path(extension_dir)
+        if not extension_dir.is_dir():
+            raise ExtensionError(f"{description} is not a directory.")
+        try:
+            ensure_tree_has_no_links(extension_dir)
+        except ProfileManagerError as error:
+            raise ExtensionError(f"{description} contains an unsupported linked path.") from error
+
+        manifest_file = extension_dir / 'manifest.json'
+        config_file = extension_dir / 'config.js'
+        if not manifest_file.is_file():
+            raise ExtensionError(f"{description} is incomplete: manifest.json is missing.")
+        if not config_file.is_file():
+            raise ExtensionError(f"{description} is incomplete: config.js is missing.")
+
+        try:
+            manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
+        except (OSError, UnicodeError, ValueError) as error:
+            raise ExtensionError(f"{description} has an unreadable manifest.json.") from error
+
+        if not isinstance(manifest, dict) or manifest.get('manifest_version') != 3:
+            raise ExtensionError(f"{description} has an unsupported manifest.json.")
+
+        content_scripts = manifest.get('content_scripts', [])
+        if not isinstance(content_scripts, list):
+            raise ExtensionError(f"{description} has an invalid content_scripts section.")
+        for script in content_scripts:
+            if not isinstance(script, dict):
+                raise ExtensionError(f"{description} has an invalid content script entry.")
+            scripts = script.get('js', [])
+            if not isinstance(scripts, list):
+                raise ExtensionError(f"{description} has an invalid content script list.")
+            for relative_name in scripts:
+                cls._declared_file(extension_dir, relative_name, description)
+
+        icons = manifest.get('icons', {})
+        if icons is not None:
+            if not isinstance(icons, dict):
+                raise ExtensionError(f"{description} has an invalid icons section.")
+            for relative_name in icons.values():
+                cls._declared_file(extension_dir, relative_name, description)
+        return manifest
+
+    def get_source_path(self):
+        return Path(EXT_DIR)
+
+    def discover_sources(self):
+        """Return valid supported extension sources under the project root."""
+        source = self.get_source_path()
+        if not source.exists():
+            return {}
+        checked_path(source, self._source_root())
+        self._validate_extension_directory(source, 'Autofill extension source')
+        return {AUTOFILL_EXTENSION_NAME: source}
+
+    # Short alias for callers that use discovery as a verb.
+    discover = discover_sources
+
+    def profile_extension_path(self, profile_id):
+        profile_dir = self.profile_manager.require_profile_dir(profile_id)
+        extensions_dir = self._profile_extensions_dir(profile_dir)
+        return checked_path(
+            extensions_dir / AUTOFILL_EXTENSION_NAME,
+            profile_dir,
+        )
+
+    def get_profile_extension_paths(self, profile_id):
+        """Return a valid existing deployment, or no optional extension."""
+        # Keep launch error ordering compatible with M1: the launcher reports a
+        # missing browser runtime before an unknown profile. This helper only
+        # inspects an already-resolved directory and never creates one.
+        profile_dir = self.profile_manager.get_profile_dir(profile_id)
+        if not profile_dir.is_dir():
+            return []
+        target = checked_path(
+            self._profile_extensions_dir(profile_dir) / AUTOFILL_EXTENSION_NAME,
+            profile_dir,
+        )
+        if not target.exists():
+            return []
+        try:
+            self._validate_extension_directory(
+                target,
+                f"Profile {profile_id} extension deployment",
+            )
+        except ExtensionError as error:
+            # An optional extension must never prevent the browser profile from
+            # opening. The account data remains in the profile and is not changed.
+            logger.warning("Skipping invalid optional extension deployment for profile %s: %s", profile_id, error)
+            return []
+        return [target]
+
+    @staticmethod
+    def _remove_path(path):
+        path = Path(path)
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
+
+    def ensure_profile_extension(self, profile_id):
+        """Deploy current reusable source while preserving profile config.js."""
+        profile_dir = self.profile_manager.require_profile_dir(profile_id)
+        source = self.get_source_path()
+        if not source.exists():
+            raise ExtensionNotFoundError(f"Autofill extension source not found at {source}")
+        self._validate_extension_directory(source, 'Autofill extension source')
+
+        extensions_dir = self._profile_extensions_dir(profile_dir)
+        extensions_dir.mkdir(parents=True, exist_ok=True)
+        target = checked_path(extensions_dir / AUTOFILL_EXTENSION_NAME, profile_dir)
+        if target.exists() and not target.is_dir():
+            raise ExtensionDeploymentError(
+                f"Profile {profile_id} extension deployment is not a directory."
+            )
+
+        existing_config = None
+        if target.is_dir():
+            ensure_tree_has_no_links(target)
+            if (target / 'config.js').is_file():
+                existing_config = (target / 'config.js').read_bytes()
+
+        staging = checked_path(
+            extensions_dir / f".{AUTOFILL_EXTENSION_NAME}.staging-{uuid.uuid4().hex}",
+            profile_dir,
+        )
+        backup = checked_path(
+            extensions_dir / f".{AUTOFILL_EXTENSION_NAME}.backup-{uuid.uuid4().hex}",
+            profile_dir,
+        )
+        moved_to_backup = False
+        try:
+            shutil.copytree(source, staging)
+            staged_config = checked_path(staging / 'config.js', staging)
+            if existing_config is not None:
+                staged_config.write_bytes(existing_config)
+
+            # Preserve profile-local files unknown to the reusable source. The
+            # known profile-specific config is handled explicitly above.
+            if target.is_dir():
+                for current, _, files in os.walk(target, followlinks=False):
+                    for name in files:
+                        existing = Path(current) / name
+                        relative = existing.relative_to(target)
+                        if relative == Path('config.js'):
+                            continue
+                        destination = checked_path(staging / relative, staging)
+                        if not destination.exists():
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(existing, destination)
+
+            self._validate_extension_directory(staging, 'Staged autofill extension')
+            if target.exists():
+                target.replace(backup)
+                moved_to_backup = True
+            staging.replace(target)
+            if backup.exists():
+                try:
+                    self._remove_path(backup)
+                except OSError:
+                    logger.warning("Old extension deployment could not be cleaned for profile %s", profile_id)
+            return target
+        except ExtensionError:
+            raise
+        except (OSError, shutil.Error) as error:
+            raise ExtensionDeploymentError(
+                f"Could not deploy the autofill extension for profile {profile_id}."
+            ) from error
+        finally:
+            if staging.exists():
+                try:
+                    self._remove_path(staging)
+                except OSError:
+                    logger.warning("Temporary extension deployment could not be cleaned")
+            if moved_to_backup and backup.exists() and not target.exists():
+                try:
+                    backup.replace(target)
+                except OSError:
+                    logger.error("Previous extension deployment could not be restored for profile %s", profile_id)
+
+
 class AccountManager:
     """Manage Discord account credentials in extension"""
     
     def __init__(self, profile_manager):
         self.profile_manager = profile_manager
-    
+        self.extension_manager = ExtensionManager(profile_manager)
+
+    def _ensure_extension_installed(self, profile_id):
+        """Ensure the supported autofill extension is safely deployed."""
+        return self.extension_manager.ensure_profile_extension(profile_id)
+
     def _ensure_both_extensions_installed(self, profile_id):
-        """Ensure both extensions are installed in profile"""
-        profile_dir = self.profile_manager.require_profile_dir(profile_id)
-        
-        # Create Extensions folder if not exists
-        extensions_dir = checked_path(profile_dir / "Unpacked Extensions", profile_dir)
-        extensions_dir.mkdir(parents=True, exist_ok=True)
-        
-        installed_exts = []
-        
-        # Install Discord Autofill Extension
-        autofill_target = checked_path(extensions_dir / "discord-autofill-extension", profile_dir)
-        if EXT_DIR.exists():
-            if not autofill_target.exists():
-                shutil.copytree(EXT_DIR, autofill_target)
-                logger.info(f"Autofill extension installed for profile {profile_id}")
-            installed_exts.append(autofill_target)
-        else:
-            raise ExtensionNotFoundError(f"Autofill extension not found at {EXT_DIR}")
-        
-        # Install Token Extractor Extension
-        token_target = checked_path(extensions_dir / "discord-token-extractor-extension", profile_dir)
-        if TOKEN_EXT_DIR.exists():
-            if not token_target.exists():
-                shutil.copytree(TOKEN_EXT_DIR, token_target)
-                logger.info(f"Token extractor extension installed for profile {profile_id}")
-            installed_exts.append(token_target)
-        else:
-            logger.warning(f"Token extractor extension not found at {TOKEN_EXT_DIR}")
-            # Không raise error vì extension này không bắt buộc
-        
-        return installed_exts    
+        """Compatibility name retained for callers from the pre-M5 workflow."""
+        return [self._ensure_extension_installed(profile_id)]
     
     def _get_config_path(self, profile_id):
         """Get path to config.js for profile"""
-        profile_dir = self.profile_manager.get_profile_dir(profile_id)
-        ext_dir = profile_dir / "Unpacked Extensions" / "discord-autofill-extension"
-        return checked_path(ext_dir / "config.js", profile_dir)
-    
-    def _ensure_extension_installed(self, profile_id):
-        """Ensure extension is installed in profile"""
         profile_dir = self.profile_manager.require_profile_dir(profile_id)
-        ext_target = checked_path(profile_dir / "Unpacked Extensions" / "discord-autofill-extension", profile_dir)
-        
-        # Create Extensions folder if not exists
-        ext_target.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Check if source extension exists
-        if not EXT_DIR.exists():
-            raise ExtensionNotFoundError(f"Extension not found at {EXT_DIR}")
-        
-        # Copy extension if not already there
-        if not ext_target.exists():
-            shutil.copytree(EXT_DIR, ext_target)
-            logger.info(f"Extension installed for profile {profile_id}")
-        
-        return ext_target
+        ext_dir = self.extension_manager.profile_extension_path(profile_id)
+        return checked_path(ext_dir / "config.js", profile_dir)
     
     def _enable_developer_mode(self, profile_id):
         """Enable developer mode in profile preferences"""
@@ -1284,27 +1466,46 @@ class AccountManager:
         if totp_secret:
             totp_secret = totp_secret.upper()
         
-        # Ensure both extensions are installed
-        installed_exts = self._ensure_both_extensions_installed(profile_id)
+        # Deploy the reusable source and retain this profile's existing config
+        # until the new account configuration is written below.
+        self._ensure_extension_installed(profile_id)
         
         # Enable developer mode
         self._enable_developer_mode(profile_id)
         
-        # Create config.js for autofill extension
-        autofill_ext_path = self.profile_manager.get_profile_dir(profile_id) / "Unpacked Extensions" / "discord-autofill-extension"
+        # Create profile-specific config.js. JSON encoding keeps account values
+        # from changing the JavaScript structure when special characters occur.
         config_content = f"""// Discord Auto-fill Extension Configuration
-    const ACCOUNT = {{
-        email: "{email}",
-        password: "{password}",
-        totpSecret: "{totp_secret}"
-    }};
-    """
+const ACCOUNT = {{
+    email: {json.dumps(email, ensure_ascii=True)},
+    password: {json.dumps(password, ensure_ascii=True)},
+    totpSecret: {json.dumps(totp_secret, ensure_ascii=True)}
+}};
+"""
         
         config_file = self._get_config_path(profile_id)
-        with open(config_file, 'w', encoding='utf-8') as f:
-            f.write(config_content)
+        temp_file = checked_path(
+            config_file.with_name(f".config-{uuid.uuid4().hex}.tmp"),
+            config_file.parent,
+        )
+        try:
+            with open(temp_file, 'w', encoding='utf-8', newline='') as f:
+                f.write(config_content)
+                f.flush()
+                os.fsync(f.fileno())
+            temp_file.replace(config_file)
+        except (OSError, UnicodeError) as error:
+            raise ProfileManagerError(
+                f"Could not save the account configuration for profile {profile_id}."
+            ) from error
+        finally:
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except OSError:
+                    logger.warning("Temporary account configuration could not be cleaned")
         
-        logger.info(f"Account configured for profile {profile_id} with both extensions")
+        logger.info(f"Account configured for profile {profile_id}")
     
     def get_account(self, profile_id):
         """Get account information from config.js"""
@@ -1314,29 +1515,32 @@ class AccountManager:
             return None
         
         try:
-            with open(config_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # Extract values using regex
-            email_match = re.search(r'email:\s*"([^"]*)"', content)
-            password_match = re.search(r'password:\s*"([^"]*)"', content)
-            totp_match = re.search(r'totpSecret:\s*"([^"]*)"', content)
-            
-            if email_match and password_match and totp_match:
-                email = email_match.group(1).strip()
-                password = password_match.group(1).strip()
-                totp = totp_match.group(1).strip()
+            content = config_file.read_text(encoding='utf-8')
+            values = {}
+            for field in ('email', 'password', 'totpSecret'):
+                match = re.search(
+                    rf'\b{field}\s*:\s*("(?:\\.|[^"\\])*")',
+                    content,
+                )
+                if not match:
+                    return None
+                try:
+                    values[field] = json.loads(match.group(1))
+                except (TypeError, ValueError):
+                    return None
 
-                # chỉ cần email + password là đủ
-                if email and password:
-                    return {
-                        'email': email,
-                        'password': password,
-                        'totp_secret': totp  # có thể rỗng
-                    }
-            
-        except Exception as e:
-            logger.error(f"Failed to read account for {profile_id}: {e}")
+            email = values['email'].strip()
+            password = values['password'].strip()
+            totp = values['totpSecret'].strip()
+            if email and password:
+                return {
+                    'email': email,
+                    'password': password,
+                    'totp_secret': totp
+                }
+        except (OSError, UnicodeError):
+            # Do not include configuration contents or exception text in logs.
+            logger.warning("Could not read autofill configuration for profile %s", profile_id)
         
         return None
     
@@ -1353,8 +1557,22 @@ const ACCOUNT = {
     totpSecret: ""
 };
 """
-            with open(config_file, 'w', encoding='utf-8') as f:
-                f.write(empty_config)
+            temp_file = checked_path(
+                config_file.with_name(f".config-{uuid.uuid4().hex}.tmp"),
+                config_file.parent,
+            )
+            try:
+                with open(temp_file, 'w', encoding='utf-8', newline='') as f:
+                    f.write(empty_config)
+                    f.flush()
+                    os.fsync(f.fileno())
+                temp_file.replace(config_file)
+            finally:
+                if temp_file.exists():
+                    try:
+                        temp_file.unlink()
+                    except OSError:
+                        logger.warning("Temporary account configuration could not be cleaned")
             
             logger.info(f"Account removed for profile {profile_id}")
     
@@ -2012,11 +2230,7 @@ class ProfileManagerApp:
         for pid, name in selected:
             try:
                 self.update_status(f"Đang mở Discord với profile {name}...")
-                profile_dir = self.profile_manager.get_profile_dir(pid)
-                extensions_dir = profile_dir / 'Unpacked Extensions'
-                extension_paths = [extensions_dir / name for name in
-                                   ('discord-autofill-extension', 'discord-token-extractor-extension')
-                                   if (extensions_dir / name).exists()]
+                extension_paths = ExtensionManager(self.profile_manager).get_profile_extension_paths(pid)
                 if self.launcher.launch_discord(pid, extension_paths or None):
                     requested += 1
                 else:
@@ -2201,7 +2415,7 @@ class ProfileManagerApp:
 
         except InvalidAccountFormatError as e:
             messagebox.showerror("Sai định dạng", str(e))
-        except ExtensionNotFoundError as e:
+        except ExtensionError as e:
             messagebox.showerror("Lỗi Extension", 
                                f"Không tìm thấy extension Discord autofill.\n\n"
                                f"Hãy đảm bảo extension tồn tại tại:\n{EXT_DIR}")
