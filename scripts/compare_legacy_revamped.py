@@ -9,6 +9,8 @@ import logging
 import sys
 import tempfile
 import types
+from contextlib import contextmanager
+from unittest.mock import Mock
 from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +40,7 @@ def main():
         results["PATH POLICY"] = _compare_path_policy()
         results["ENVIRONMENT"] = _compare_environment()
         results["PROXY"] = _compare_proxy()
+        results["LAUNCH ARGUMENTS"] = _compare_launch_arguments()
     except Exception:
         # A comparison failure is reported as FAIL, without exposing paths or
         # exception text that might contain local data.
@@ -165,6 +168,71 @@ def _compare_proxy():
         if proxy.parse_proxy_string(value) != legacy.parse_proxy_string(value):
             return False
     return True
+
+
+def _compare_launch_arguments():
+    legacy = _load_legacy()
+    with tempfile.TemporaryDirectory(prefix="compare-launch-", dir=PROJECT_ROOT / "tmp") as name:
+        root = Path(name).resolve()
+        paths = core.ProjectPaths(root)
+        paths.browser_exe.parent.mkdir(parents=True)
+        paths.browser_exe.write_bytes(b"synthetic runtime")
+        for attribute, value in {
+            "PROJECT_ROOT": paths.root,
+            "BROWSER_EXE": paths.browser_exe,
+            "DATA_DIR": paths.data_dir,
+            "PROFILES_DIR": paths.profiles_dir,
+            "CONFIG_DIR": paths.config_dir,
+            "PROFILES_JSON": paths.profiles_json,
+            "LOCAL_STATE": paths.local_state,
+            "EXT_DIR": paths.autofill_extension_dir,
+        }.items():
+            setattr(legacy, attribute, value)
+        legacy_popen = Mock()
+        legacy_popen.return_value.poll.return_value = None
+        with patch.object(legacy.subprocess, "Popen", legacy_popen), patch.object(
+            legacy.psutil, "process_iter", return_value=[]
+        ):
+            profile_id = legacy.ProfileManager().create_profile("Compare")
+            legacy.ChromiumLauncher().launch_discord(profile_id)
+            legacy_command = legacy_popen.call_args.args[0]
+
+        profile_path = paths.profiles_dir / profile_id
+
+        class Service:
+            def __init__(self):
+                self.record = {"profile_id": profile_id, "proxy_enabled": False}
+
+            @contextmanager
+            def operation(self):
+                yield
+
+            def require_profile_dir(self, requested):
+                if requested != profile_id:
+                    raise ValueError("missing synthetic profile")
+                return profile_path
+
+            def get_profile_record(self, requested):
+                return dict(self.record)
+
+            def get_browser_profile_dir(self, requested):
+                return profile_path / "Default"
+
+            def mark_profile_opened(self, requested):
+                pass
+
+        revamped_popen = Mock()
+        revamped_popen.return_value.poll.return_value = None
+        revamped = __import__("revamped.launcher", fromlist=["ChromiumLauncher"]).ChromiumLauncher(
+            paths,
+            Service(),
+            process_inspector=__import__("revamped.processes", fromlist=["ChromiumProcessInspector"]).ChromiumProcessInspector(
+                process_iter=lambda *_: []
+            ),
+            process_factory=revamped_popen,
+        )
+        revamped.launch_discord(profile_id)
+        return legacy_command == revamped_popen.call_args.args[0]
 
 
 if __name__ == "__main__":

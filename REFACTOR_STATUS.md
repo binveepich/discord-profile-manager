@@ -2,8 +2,8 @@
 
 ## Current status
 
-R0 through R4 are complete on the isolated branch `refactor/revamped-parallel`.
-R5 is next. The stable entrypoint remains legacy and packaging remains locked.
+R0 through R5 are complete on the isolated branch `refactor/revamped-parallel`.
+R6 is next. The stable entrypoint remains legacy and packaging remains locked.
 
 ## Milestones
 
@@ -14,7 +14,7 @@ R5 is next. The stable entrypoint remains legacy and packaging remains locked.
 | R2 | COMPLETE | Core/path/model primitives and deterministic parity committed; 186-test full suite and integrity gate PASS. One symlink test is skipped because the host disallows symlink creation. |
 | R3 | COMPLETE | Environment/proxy policy and deterministic parity committed; R3 tests, frozen 170-test suite, and integrity gate PASS. |
 | R4 | COMPLETE | Catalog/legacy storage boundaries, locks, atomic writes, stale-write detection, and mirror restore committed; R4 tests, frozen 170-test suite, verify, and integrity PASS. |
-| R5 | TODO | Add injected process/launcher services after R4. |
+| R5 | COMPLETE | Injected process inspection, deterministic launcher assembly, launch failure handling, and launch parity committed; full 207-test suite, verify, compare, and integrity PASS. |
 | R6 | TODO | Add extension/account compatibility after R5. |
 | R7 | TODO | Add profile lifecycle after R6. |
 | R8 | TODO | Add GUI model/controller after R7. |
