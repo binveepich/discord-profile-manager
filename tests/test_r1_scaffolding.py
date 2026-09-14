@@ -57,7 +57,7 @@ class R1ScaffoldingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PROTECTED SOURCE INTEGRITY: PASS", result.stdout)
 
-    def test_comparison_harness_reports_not_implemented_without_claiming_pass(self):
+    def test_comparison_harness_reports_unknown_categories_truthfully(self):
         result = subprocess.run(
             [sys.executable, "-B", "scripts/compare_legacy_revamped.py"],
             cwd=PROJECT_ROOT,
@@ -66,9 +66,9 @@ class R1ScaffoldingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("VALIDATION: NOT IMPLEMENTED", result.stdout)
+        self.assertIn("VALIDATION: PASS", result.stdout)
+        self.assertIn("ENVIRONMENT: NOT IMPLEMENTED", result.stdout)
         self.assertIn("LEGACY/REVAMPED PARITY: NOT IMPLEMENTED", result.stdout)
-        self.assertNotIn("LEGACY/REVAMPED PARITY: PASS", result.stdout)
 
     def test_revamped_main_refuses_without_stateful_workspace(self):
         result = subprocess.run(
@@ -84,4 +84,3 @@ class R1ScaffoldingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

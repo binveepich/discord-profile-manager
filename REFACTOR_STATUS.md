@@ -2,8 +2,8 @@
 
 ## Current status
 
-R0 and R1 are complete on the isolated branch `refactor/revamped-parallel`.
-R2 is next. The stable entrypoint remains legacy and packaging remains locked.
+R0, R1, and R2 are complete on the isolated branch `refactor/revamped-parallel`.
+R3 is next. The stable entrypoint remains legacy and packaging remains locked.
 
 ## Milestones
 
@@ -11,7 +11,7 @@ R2 is next. The stable entrypoint remains legacy and packaging remains locked.
 | --- | --- | --- |
 | R0 | COMPLETE | Baseline frozen; `verify.py` PASS; frozen suite 170/170; see `docs/refactor/BASELINE.md`. |
 | R1 | COMPLETE | Commit `R1: add parallel refactor contract infrastructure`; 5 R1 tests, frozen suite 170/170, and integrity check PASS. |
-| R2 | TODO | Add safe core/model primitives after R1. |
+| R2 | COMPLETE | Core/path/model primitives and deterministic parity committed; 186-test full suite and integrity gate PASS. One symlink test is skipped because the host disallows symlink creation. |
 | R3 | TODO | Add environment/proxy policy after R2. |
 | R4 | TODO | Add disposable storage boundaries after R3. |
 | R5 | TODO | Add injected process/launcher services after R4. |
