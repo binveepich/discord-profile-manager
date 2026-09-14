@@ -258,7 +258,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertTrue(self.manager.ChromiumLauncher().launch_discord(profile_id))
         command = self.popen.call_args.args[0]
         self.assertIn("--window-size=390,844", command)
-        self.assertIn("--force-device-scale-factor=2", command)
+        self.assertIn("--force-device-scale-factor=1", command)
         self.assertIn("--lang=en-US", command)
         self.assertIn("--use-mobile-user-agent", command)
         self.assertIn("--touch-events=enabled", command)

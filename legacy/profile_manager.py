@@ -7,6 +7,7 @@ Supports multiple Discord accounts with auto-fill extension
 
 import os
 import json
+import ipaddress
 import subprocess
 import sys
 import tkinter as tk
@@ -60,10 +61,18 @@ SUPPORTED_ENVIRONMENT_PRESETS = (
     ENVIRONMENT_MOBILE,
     ENVIRONMENT_CUSTOM,
 )
+SUPPORTED_PROXY_SCHEMES = (
+    "http",
+    "https",
+    "socks4",
+    "socks5",
+)
+PROXY_HOST_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+PROXY_HOST_PATTERN = re.compile(r"^[A-Za-z0-9.-]+$")
 MOBILE_ENVIRONMENT_DEFAULTS = {
     "viewport_width": 390,
     "viewport_height": 844,
-    "device_scale_factor": 2.0,
+    "device_scale_factor": 1.0,
     "language": "en-US",
     "mobile_mode": True,
     "touch_mode": True,
@@ -116,6 +125,10 @@ class ExtensionDeploymentError(ExtensionError):
 
 class InvalidAccountFormatError(ProfileManagerError):
     """Invalid account format for Discord credentials"""
+    pass
+
+class ProxyValidationError(ProfileManagerError):
+    """A user-provided proxy configuration is not safe to apply."""
     pass
 
 
@@ -436,6 +449,245 @@ def normalize_timezone(value):
     return candidate
 
 
+def normalize_proxy_scheme(value):
+    """Return one of the proxy schemes supported by Chromium's proxy switch."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().casefold()
+    return candidate if candidate in SUPPORTED_PROXY_SCHEMES else None
+
+
+def normalize_proxy_host(value):
+    """Return a safe hostname or IP literal without a scheme, port, or secret."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > 253:
+        return None
+    if any(ord(char) < 32 or char.isspace() for char in candidate):
+        return None
+
+    # IPv6 literals may be entered with or without the URI brackets. Brackets
+    # are added only when the launch argument is assembled.
+    if candidate.startswith("[") or candidate.endswith("]"):
+        if not (candidate.startswith("[") and candidate.endswith("]")):
+            return None
+        candidate = candidate[1:-1]
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        address = None
+    if address is not None:
+        return address.compressed.casefold()
+
+    # A colon, slash, at-sign, semicolon, or comma here would turn the value
+    # into a different proxy argument or introduce credentials/path syntax.
+    if ":" in candidate or not PROXY_HOST_PATTERN.fullmatch(candidate):
+        return None
+    labels = candidate.rstrip(".").split(".")
+    if not labels or any(not PROXY_HOST_LABEL_PATTERN.fullmatch(label) for label in labels):
+        return None
+    return ".".join(labels).casefold()
+
+
+def normalize_proxy_port(value):
+    """Return a TCP port in the valid 1-65535 range, or None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        port = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        try:
+            port = int(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+def _proxy_off_state():
+    return {
+        "enabled": False,
+        "scheme": None,
+        "host": None,
+        "port": None,
+    }
+
+
+def normalize_proxy_config(scheme, host, port):
+    """Normalize a complete enabled proxy or return None when malformed."""
+    normalized = {
+        "scheme": normalize_proxy_scheme(scheme),
+        "host": normalize_proxy_host(host),
+        "port": normalize_proxy_port(port),
+    }
+    return normalized if all(value is not None for value in normalized.values()) else None
+
+
+def effective_proxy(record):
+    """Return one record's safe proxy state without mutating application metadata."""
+    if not isinstance(record, dict) or record.get("proxy_enabled") is not True:
+        return _proxy_off_state()
+    normalized = normalize_proxy_config(
+        record.get("proxy_scheme"),
+        record.get("proxy_host"),
+        record.get("proxy_port"),
+    )
+    if normalized is None:
+        # Malformed optional proxy metadata must never make a profile
+        # unlaunchable or accidentally enable a partial proxy.
+        return _proxy_off_state()
+    return {"enabled": True, **normalized}
+
+
+def proxy_launch_arguments(record):
+    """Build a per-profile Chromium proxy switch, or no switch when inactive."""
+    proxy = effective_proxy(record)
+    if not proxy["enabled"]:
+        return []
+    host = proxy["host"]
+    try:
+        if ipaddress.ip_address(host).version == 6:
+            host = f"[{host}]"
+    except ValueError:
+        pass
+    return [f"--proxy-server={proxy['scheme']}://{host}:{proxy['port']}"]
+
+
+def _parse_proxy_host_port(value, allow_raw_ipv6=True):
+    """Parse a host/port endpoint without guessing through malformed colons."""
+    candidate = value.strip()
+    if not candidate:
+        raise ProxyValidationError("Proxy string must include a host and port.")
+
+    host_value = None
+    port_value = None
+    if candidate.startswith("["):
+        closing = candidate.find("]")
+        if closing < 0 or not candidate[closing + 1:].startswith(":"):
+            raise ProxyValidationError("IPv6 proxy hosts must use [host]:port syntax.")
+        host_value = candidate[:closing + 1]
+        port_value = candidate[closing + 2:]
+        if ":" in port_value:
+            raise ProxyValidationError("Proxy string contains an ambiguous host or port.")
+    elif candidate.count(":") == 1:
+        host_value, port_value = candidate.rsplit(":", 1)
+    elif allow_raw_ipv6 and candidate.count(":") > 1:
+        possible_host, possible_port = candidate.rsplit(":", 1)
+        if ":" not in possible_host:
+            raise ProxyValidationError("Proxy string contains an ambiguous host or port.")
+        host_value, port_value = possible_host, possible_port
+    else:
+        raise ProxyValidationError("Proxy string must use host:port syntax.")
+
+    host = normalize_proxy_host(host_value)
+    if host is None:
+        raise ProxyValidationError(
+            "Proxy host must be a hostname or IP address without credentials or a path."
+        )
+    port = normalize_proxy_port(port_value)
+    if port is None:
+        raise ProxyValidationError("Proxy port must be a number from 1 to 65535.")
+    return host, port
+
+
+def parse_proxy_string(value):
+    """Parse common provider output without storing or logging credentials.
+
+    Supported forms are host:port, host:port:user:pass, scheme://host:port,
+    and scheme://user:pass@host:port. Credentials are returned for the UI to
+    report that M8 cannot apply them; they are never accepted by set_proxy().
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ProxyValidationError("Proxy string is empty.")
+    text = value.strip()
+    username = None
+    password = None
+    scheme = "http"
+
+    if "://" in text:
+        scheme_value, authority = text.split("://", 1)
+        scheme = normalize_proxy_scheme(scheme_value)
+        if scheme is None:
+            raise ProxyValidationError(
+                "Unsupported proxy scheme. Choose HTTP, HTTPS, SOCKS4, or SOCKS5."
+            )
+        if not authority or any(char in authority for char in "/?#"):
+            raise ProxyValidationError("Proxy string contains an invalid authority.")
+        if "@" in authority:
+            userinfo, endpoint = authority.split("@", 1)
+            if "@" in endpoint or ":" not in userinfo:
+                raise ProxyValidationError("Authenticated proxy syntax is malformed.")
+            username, password = userinfo.split(":", 1)
+            if not username or not password:
+                raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
+            if endpoint.count(":") > 1 and not endpoint.startswith("["):
+                raise ProxyValidationError("Authenticated IPv6 proxies must use [host]:port syntax.")
+        host, port = _parse_proxy_host_port(
+            endpoint if "@" in authority else authority,
+            allow_raw_ipv6=username is None,
+        )
+    else:
+        scheme = "http"
+        if text.startswith("["):
+            closing = text.find("]")
+            if closing < 0 or not text[closing + 1:].startswith(":"):
+                raise ProxyValidationError("IPv6 proxy hosts must use [host]:port syntax.")
+            host_value = text[:closing + 1]
+            suffix = text[closing + 2:]
+            fields = suffix.split(":", 2)
+            if len(fields) == 1:
+                port_value = fields[0]
+            elif len(fields) == 3:
+                port_value, username, password = fields
+                if not username or not password:
+                    raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
+            else:
+                raise ProxyValidationError("Authenticated proxy syntax is malformed.")
+            host, port = _parse_proxy_host_port(
+                f"{host_value}:{port_value}", allow_raw_ipv6=False
+            )
+        elif text.count(":") > 1:
+            # An unbracketed IPv6 endpoint is accepted only when the final
+            # colon clearly separates a valid port. Credentials remain
+            # rejected here because their separators are ambiguous.
+            try:
+                host, port = _parse_proxy_host_port(text, allow_raw_ipv6=True)
+            except ProxyValidationError:
+                fields = text.split(":", 3)
+                if len(fields) != 4:
+                    raise
+                host, port = _parse_proxy_host_port(
+                    f"{fields[0]}:{fields[1]}", allow_raw_ipv6=False
+                )
+                username, password = fields[2], fields[3]
+                if not username or not password:
+                    raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
+        else:
+            fields = text.split(":", 3)
+            if len(fields) == 2:
+                host, port = _parse_proxy_host_port(text, allow_raw_ipv6=False)
+            elif len(fields) == 4:
+                host, port = _parse_proxy_host_port(
+                    f"{fields[0]}:{fields[1]}", allow_raw_ipv6=False
+                )
+                username, password = fields[2], fields[3]
+                if not username or not password:
+                    raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
+            else:
+                raise ProxyValidationError("Proxy string must use host:port syntax.")
+
+    return {
+        "scheme": scheme,
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": password,
+        "authenticated": username is not None or password is not None,
+    }
+
+
 def normalize_viewport_dimension(value, minimum, maximum):
     """Return an integer viewport dimension inside a safe range or None."""
     if isinstance(value, bool):
@@ -709,8 +961,10 @@ class ProfileMetadataManager:
             # malformed values loadable so the launcher can fall back to a
             # normal Desktop session instead of locking the user out of a
             # profile. Sensitive field names are still rejected above.
-            if not isinstance(record['proxy_enabled'], bool):
-                raise ValueError("Invalid proxy_enabled value")
+            # Proxy fields are optional launch configuration. A malformed
+            # value is treated as Proxy Off by effective_proxy() so an old or
+            # hand-edited catalog remains loadable and never gains a partial
+            # proxy override.
         return data
 
     @staticmethod
@@ -1045,6 +1299,56 @@ class ProfileManager:
     # Explicit aliases make the M7 API readable to callers that think in
     # terms of a preset rather than a complete environment object.
     set_environment_preset = set_environment
+
+    def get_proxy(self, profile_id):
+        """Return one profile's normalized proxy state without network access."""
+        profile_id = validate_profile_id(profile_id)
+        record = self._record_map(self._load_catalog()).get(profile_id)
+        if record is None:
+            raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+        return dict(effective_proxy(record))
+
+    def set_proxy(self, profile_id, enabled, scheme=None, host=None, port=None):
+        """Persist an optional unauthenticated proxy for exactly one profile."""
+        profile_id = validate_profile_id(profile_id)
+        if enabled is not True and enabled is not False:
+            raise ProxyValidationError("Proxy state must be Enabled or Off.")
+        normalized = None
+        if enabled:
+            normalized = normalize_proxy_config(scheme, host, port)
+            if normalize_proxy_scheme(scheme) is None:
+                raise ProxyValidationError(
+                    "Unsupported proxy scheme. Choose HTTP, HTTPS, SOCKS4, or SOCKS5."
+                )
+            if normalize_proxy_host(host) is None:
+                raise ProxyValidationError(
+                    "Proxy host must be a hostname or IP address without a scheme, port, path, or credentials."
+                )
+            if normalize_proxy_port(port) is None:
+                raise ProxyValidationError("Proxy port must be a number from 1 to 65535.")
+            if normalized is None:
+                raise ProxyValidationError("Proxy configuration is incomplete or invalid.")
+
+        with self.local_state.operation():
+            self._check_registry_idle()
+            self.require_profile_dir(profile_id)
+            catalog = self._load_catalog()
+            record = self._record_map(catalog).get(profile_id)
+            if record is None:
+                raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+            if not enabled:
+                record["proxy_enabled"] = False
+                for field in ("proxy_scheme", "proxy_host", "proxy_port"):
+                    record.pop(field, None)
+            else:
+                record["proxy_enabled"] = True
+                record.update({
+                    "proxy_scheme": normalized["scheme"],
+                    "proxy_host": normalized["host"],
+                    "proxy_port": normalized["port"],
+                })
+            self._save_catalog(catalog)
+        return self.get_proxy(profile_id)
 
     def _legacy_info_for_record(self, record, existing=None):
         info = dict(existing or {})
@@ -1920,6 +2224,11 @@ class ChromiumLauncher:
     def build_environment_arguments(record):
         """Expose centralized environment switch generation for tests/callers."""
         return environment_launch_arguments(record)
+
+    @staticmethod
+    def build_proxy_arguments(record):
+        """Expose centralized per-profile proxy switch generation."""
+        return proxy_launch_arguments(record)
         
     def launch_discord(self, profile_id, extension_paths=None):
         """Launch Discord with specified profile and multiple extensions"""
@@ -1949,6 +2258,7 @@ class ChromiumLauncher:
                 "--process-per-site",
             ]
             cmd.extend(self.build_environment_arguments(profile_record))
+            cmd.extend(self.build_proxy_arguments(profile_record))
             cmd.append("https://discord.com/app")
 
             if extension_paths:
@@ -2272,6 +2582,29 @@ class ProfileManagerApp:
         )
         self.btn_edit_environment.pack(pady=3, fill=tk.X)
 
+        # ===== PROXY =====
+        proxy_frame = tk.LabelFrame(
+            right_frame,
+            text="Proxy",
+            bg='#f0f0f0',
+            font=('Helvetica', 9, 'bold'),
+            padx=5,
+            pady=5
+        )
+        proxy_frame.pack(fill=tk.X, pady=(0, 8))
+
+        self.btn_edit_proxy = tk.Button(
+            proxy_frame,
+            text="Edit Proxy",
+            command=self.edit_proxy,
+            bg='#6C757D',
+            fg='white',
+            activebackground='#545B62',
+            activeforeground='white',
+            **btn_style
+        )
+        self.btn_edit_proxy.pack(pady=3, fill=tk.X)
+
         # ===== PROFILE ACTIONS =====
         profile_frame = tk.LabelFrame(
             right_frame,
@@ -2431,7 +2764,7 @@ class ProfileManagerApp:
 
     @staticmethod
     def _display_proxy(record):
-        return "On" if bool(record.get("proxy_enabled", False)) else "Off"
+        return "On" if effective_proxy(record)["enabled"] else "Off"
 
     @staticmethod
     def _display_last_opened(value):
@@ -2697,6 +3030,7 @@ class ProfileManagerApp:
         self._set_button_state("btn_open_discord", tk.NORMAL if selected_count else tk.DISABLED)
         self._set_button_state("btn_rename_profile", tk.NORMAL if selected_count == 1 else tk.DISABLED)
         self._set_button_state("btn_edit_environment", tk.NORMAL if selected_count == 1 else tk.DISABLED)
+        self._set_button_state("btn_edit_proxy", tk.NORMAL if selected_count == 1 else tk.DISABLED)
         self._set_button_state("btn_delete_profile", tk.NORMAL if selected_count else tk.DISABLED)
         self._set_button_state("btn_select_all", tk.NORMAL if row_count else tk.DISABLED)
         self._set_button_state("btn_deselect_all", tk.NORMAL if selected_count else tk.DISABLED)
@@ -2892,6 +3226,200 @@ class ProfileManagerApp:
         # Apply the same state transition path used by preset changes so the
         # initial Desktop/Mobile display is never made from stale variables.
         preset_var.set(initial_state["preset"].title())
+        update_fields()
+
+    def edit_proxy(self):
+        """Edit one profile's proxy, including safe paste-and-parse input."""
+        profile = self.get_selected_profile()
+        if not profile:
+            return
+        profile_id, _ = profile
+
+        try:
+            record = next(
+                item for item in self.profile_manager.get_profile_metadata()
+                if item.get("profile_id") == profile_id
+            )
+            current_proxy = effective_proxy(record)
+        except (StopIteration, AttributeError, ProfileManagerError, OSError, TypeError, ValueError) as error:
+            messagebox.showerror("Error", f"Could not load profile proxy:\n{error}")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Proxy - {profile_id}")
+        dialog.geometry("520x520")
+        dialog.resizable(False, False)
+        dialog.configure(bg="#f5f6fa")
+        dialog.grab_set()
+
+        tk.Label(
+            dialog,
+            text="Profile Proxy",
+            font=("Segoe UI", 13, "bold"),
+            bg="#f5f6fa",
+        ).pack(pady=(16, 4))
+        tk.Label(
+            dialog,
+            text="This endpoint applies only when this profile is launched.",
+            bg="#f5f6fa",
+            fg="#555555",
+        ).pack(pady=(0, 12))
+
+        mode_var = tk.StringVar(value="Enabled" if current_proxy["enabled"] else "Off")
+        proxy_string_var = tk.StringVar()
+        scheme_var = tk.StringVar(value=(current_proxy["scheme"] or "http").upper())
+        host_var = tk.StringVar(value=current_proxy["host"] or "")
+        port_var = tk.StringVar(value="" if current_proxy["port"] is None else str(current_proxy["port"]))
+        username_var = tk.StringVar()
+        password_var = tk.StringVar()
+
+        mode_frame = tk.Frame(dialog, bg="#f5f6fa")
+        mode_frame.pack(fill=tk.X, padx=35)
+        tk.Label(mode_frame, text="Proxy", bg="#f5f6fa", anchor="w").pack(
+            side=tk.LEFT, padx=(0, 12)
+        )
+        mode_menu = ttk.Combobox(
+            mode_frame,
+            textvariable=mode_var,
+            values=("Off", "Enabled"),
+            state="readonly",
+            width=24,
+        )
+        mode_menu.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        string_frame = tk.LabelFrame(
+            dialog,
+            text="Paste proxy string",
+            bg="#f5f6fa",
+            padx=8,
+            pady=8,
+        )
+        string_frame.pack(fill=tk.X, padx=35, pady=(12, 8))
+        proxy_string_entry = tk.Entry(string_frame, textvariable=proxy_string_var)
+        proxy_string_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        parse_button = tk.Button(string_frame, text="Parse", width=9)
+        parse_button.pack(side=tk.RIGHT)
+
+        advanced_frame = tk.LabelFrame(
+            dialog,
+            text="Advanced fields",
+            bg="#f5f6fa",
+            padx=8,
+            pady=8,
+        )
+        advanced_frame.pack(fill=tk.X, padx=35)
+        form = tk.Frame(advanced_frame, bg="#f5f6fa")
+        form.pack(fill=tk.X)
+
+        tk.Label(form, text="Scheme", bg="#f5f6fa", anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(0, 12), pady=4
+        )
+        scheme_menu = ttk.Combobox(
+            form,
+            textvariable=scheme_var,
+            values=tuple(scheme.upper() for scheme in SUPPORTED_PROXY_SCHEMES),
+            state="readonly",
+            width=24,
+        )
+        scheme_menu.grid(row=0, column=1, sticky="ew", pady=4)
+
+        advanced_entries = []
+        for row, (label, variable) in enumerate(
+            (("Host", host_var), ("Port", port_var), ("Username", username_var)), start=1
+        ):
+            tk.Label(form, text=label, bg="#f5f6fa", anchor="w").grid(
+                row=row, column=0, sticky="w", padx=(0, 12), pady=4
+            )
+            entry = tk.Entry(form, textvariable=variable, width=30)
+            entry.grid(row=row, column=1, sticky="ew", pady=4)
+            advanced_entries.append(entry)
+
+        tk.Label(form, text="Password", bg="#f5f6fa", anchor="w").grid(
+            row=4, column=0, sticky="w", padx=(0, 12), pady=4
+        )
+        password_entry = tk.Entry(form, textvariable=password_var, show="*", width=30)
+        password_entry.grid(row=4, column=1, sticky="ew", pady=4)
+        advanced_entries.append(password_entry)
+        form.columnconfigure(1, weight=1)
+
+        note_var = tk.StringVar()
+        tk.Label(
+            dialog,
+            textvariable=note_var,
+            bg="#f5f6fa",
+            fg="#555555",
+            justify=tk.LEFT,
+            wraplength=390,
+        ).pack(pady=(10, 8), padx=35, anchor="w")
+
+        def parse_proxy_input():
+            try:
+                parsed = parse_proxy_string(proxy_string_var.get())
+            except (ProxyValidationError, TypeError, ValueError) as error:
+                messagebox.showerror("Invalid proxy string", str(error), parent=dialog)
+                return
+            mode_var.set("Enabled")
+            scheme_var.set(parsed["scheme"].upper())
+            host_var.set(parsed["host"])
+            port_var.set(str(parsed["port"]))
+            username_var.set(parsed["username"] or "")
+            password_var.set(parsed["password"] or "")
+            # Do not retain a pasted credential-bearing string after parsing.
+            proxy_string_var.set("")
+            update_fields()
+
+        def update_fields(*_):
+            enabled = mode_var.get().strip().casefold() == "enabled"
+            widget_state = "normal" if enabled else "disabled"
+            scheme_menu.configure(state="readonly" if enabled else "disabled")
+            proxy_string_entry.configure(state=widget_state)
+            parse_button.configure(state=widget_state)
+            for entry in advanced_entries:
+                entry.configure(state=widget_state)
+            if username_var.get() or password_var.get():
+                note_var.set(
+                    "Authentication was parsed, but authenticated proxy launch and storage are not supported in M8. Remove the credentials before saving."
+                )
+            elif enabled:
+                note_var.set(
+                    "Paste host:port, host:port:user:pass, or scheme://host:port. IPv6 uses [host]:port."
+                )
+            else:
+                note_var.set("Proxy is off. Saved endpoint values will not be used for this profile.")
+
+        def save_proxy():
+            enabled = mode_var.get().strip().casefold() == "enabled"
+            try:
+                if enabled:
+                    if username_var.get() or password_var.get():
+                        raise ProxyValidationError(
+                            "Proxy authentication was parsed, but authenticated proxy launch and storage are not supported in M8. Remove username and password before saving."
+                        )
+                    self.profile_manager.set_proxy(
+                        profile_id,
+                        True,
+                        scheme_var.get(),
+                        host_var.get(),
+                        port_var.get(),
+                    )
+                else:
+                    self.profile_manager.set_proxy(profile_id, False)
+                dialog.destroy()
+                self.refresh_list()
+                self.update_status(f"Proxy updated for {profile_id}")
+            except (AttributeError, ProfileManagerError, OSError, TypeError, ValueError) as error:
+                messagebox.showerror("Error", f"Could not save profile proxy:\n{error}", parent=dialog)
+
+        parse_button.configure(command=parse_proxy_input)
+        mode_menu.bind("<<ComboboxSelected>>", update_fields)
+        button_frame = tk.Frame(dialog, bg="#f5f6fa")
+        button_frame.pack(pady=(8, 16))
+        tk.Button(button_frame, text="Save", command=save_proxy, width=12).pack(
+            side=tk.LEFT, padx=5
+        )
+        tk.Button(button_frame, text="Cancel", command=dialog.destroy, width=12).pack(
+            side=tk.LEFT, padx=5
+        )
         update_fields()
 
     def select_all_profiles(self):

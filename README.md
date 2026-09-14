@@ -23,11 +23,12 @@ or is a directory instead of a file, startup displays the expected full path and
 returns after the error dialog is dismissed. A missing runtime encountered when
 opening a profile uses the existing GUI error dialog.
 
-## M1/M2/M3/M4/M5 storage compatibility
+## M1-M8 storage and launch compatibility
 
 - Application-owned profile metadata is stored at `config/profiles.json` with a
   versioned `profiles` list. It contains profile IDs, display names, relative
-  profile directories, timestamps, and the M4 environment/proxy placeholders.
+  profile directories, timestamps, optional environment settings, and optional
+  proxy settings.
 - The existing `legacy/data/Local State` registry is retained as a compatibility
   reader/mirror for M1-M3 installations. It is not the primary application
   profile catalog, and Chromium-owned Local State files inside user-data roots
@@ -53,10 +54,34 @@ opening a profile uses the existing GUI error dialog.
 - Each launch keeps the existing launch flags, extension arguments, and Discord
   URL while selecting the resolved legacy or managed user-data root.
 
-M5 does not implement environment emulation, mobile behavior, proxy networking, an
-updater, credential redesign, GUI/module migration, or a plugin framework. Legacy
-profile data, managed profiles, and logs remain excluded from Git. Chromium runtime
-files are unchanged.
+Legacy profile data, managed profiles, and logs remain excluded from Git.
+Chromium runtime files are unchanged. Browser environment and proxy settings are
+launch metadata only; they do not change Chromium source or implement deep
+fingerprint spoofing.
+
+## M7 environment behavior
+
+- `Desktop` (including older `default` metadata) keeps the normal launch flags.
+- `Mobile` applies generic mobile user-agent, touch, viewport, language, and
+  device-scale launch settings. The default scale factor is `1.0` and safe
+  per-profile overrides remain supported.
+- `Custom` accepts validated viewport, scale, language, mobile/touch, and timezone
+  metadata. Timezone is stored and validated but is not applied by the launcher
+  because the app has no CDP/session layer.
+- Invalid optional environment metadata falls back to a normal desktop launch.
+
+## M8 optional proxy behavior
+
+- Proxy configuration is optional and isolated per profile. Proxy Off is the
+  default and adds no `--proxy-server` switch.
+- Valid unauthenticated `http`, `https`, `socks4`, and `socks5` endpoints are
+  normalized and passed to Chromium only for the profile that enabled them.
+- Malformed or incomplete optional proxy metadata safely behaves as Proxy Off;
+  it does not prevent a profile from launching.
+- M8 does not support proxy authentication, credential storage, proxy rotation,
+  proxy health checks, or provider integration. Credential-bearing pasted input
+  is rejected before save and is never stored in `profiles.json`, logged, or
+  passed to Chromium.
 
 ## M5 extension behavior
 
