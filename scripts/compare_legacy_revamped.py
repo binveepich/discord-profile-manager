@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from revamped import core, environment, proxy
+from revamped.gui import ProfileTableModel
 from revamped.profiles import ProfileService
 from revamped.processes import ChromiumProcessInspector
 from revamped.storage import LegacyStateStore
@@ -45,6 +46,7 @@ def main():
         results["PROXY"] = _compare_proxy()
         results["LAUNCH ARGUMENTS"] = _compare_launch_arguments()
         results["PROFILE LIFECYCLE"] = _compare_profile_lifecycle()
+        results["GUI MODEL"] = _compare_gui_model()
     except Exception:
         # A comparison failure is reported as FAIL, without exposing paths or
         # exception text that might contain local data.
@@ -325,6 +327,51 @@ def _compare_profile_lifecycle():
             and (legacy_migration_paths.profiles_dir / legacy_migration_id).is_dir()
             and (revamped_migration_paths.profiles_dir / revamped_migration_id).is_dir()
         )
+
+
+def _compare_gui_model():
+    with tempfile.TemporaryDirectory(prefix="compare-gui-", dir=PROJECT_ROOT / "tmp") as name:
+        root = Path(name).resolve()
+        profile_dir = root / "profiles" / "profile_0001"
+        profile_dir.mkdir(parents=True)
+        record = {
+            "profile_id": "profile_0001",
+            "display_name": "Compare",
+            "profile_directory": "profiles/profile_0001",
+            "created_at": "2026-09-11T00:00:00Z",
+            "last_opened_at": "2026-09-13T12:34:56Z",
+            "environment_preset": "mobile",
+            "proxy_enabled": True,
+            "proxy_scheme": "http",
+            "proxy_host": "proxy.example",
+            "proxy_port": 8080,
+        }
+        account = {
+            "email": "compare@example.invalid",
+            "password": "synthetic-password",
+            "totp_secret": "SYNTHETIC-TOTP",
+        }
+        legacy = _load_legacy()
+        legacy_app = legacy.ProfileManagerApp.__new__(legacy.ProfileManagerApp)
+        legacy_app.profile_manager = Mock()
+        legacy_app.profile_manager.get_profile_dir.return_value = profile_dir
+        legacy_app.account_manager = Mock()
+        legacy_app.account_manager.get_account.return_value = account
+        with patch.object(legacy, "browser_using_directory", return_value=False):
+            legacy_row = legacy.ProfileManagerApp._build_profile_row(legacy_app, record)
+
+        service = Mock()
+        service.get_profile_metadata.return_value = [record]
+        service.get_profile_dir.return_value = profile_dir
+        model = ProfileTableModel(
+            service,
+            legacy_app.account_manager,
+            __import__("revamped.processes", fromlist=["ChromiumProcessInspector"]).ChromiumProcessInspector(
+                process_iter=lambda *_: []
+            ),
+        )
+        revamped_row = model.refresh()[0]
+        return legacy_row == revamped_row
 
 
 if __name__ == "__main__":
