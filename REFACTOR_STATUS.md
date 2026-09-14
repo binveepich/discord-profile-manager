@@ -2,15 +2,15 @@
 
 ## Current status
 
-R0 is complete on the isolated branch `refactor/revamped-parallel`.
-R1 is next. The stable entrypoint remains legacy and packaging remains locked.
+R0 and R1 are complete on the isolated branch `refactor/revamped-parallel`.
+R2 is next. The stable entrypoint remains legacy and packaging remains locked.
 
 ## Milestones
 
 | Milestone | Status | Evidence / next action |
 | --- | --- | --- |
 | R0 | COMPLETE | Baseline frozen; `verify.py` PASS; frozen suite 170/170; see `docs/refactor/BASELINE.md`. |
-| R1 | TODO | Add side-effect-free scaffolding, disposable adapters, and integrity checks. |
+| R1 | COMPLETE | Commit `R1: add parallel refactor contract infrastructure`; 5 R1 tests, frozen suite 170/170, and integrity check PASS. |
 | R2 | TODO | Add safe core/model primitives after R1. |
 | R3 | TODO | Add environment/proxy policy after R2. |
 | R4 | TODO | Add disposable storage boundaries after R3. |
