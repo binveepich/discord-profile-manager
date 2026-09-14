@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from revamped import core
+from revamped import core, environment, proxy
 
 
 CATEGORIES = (
@@ -36,6 +36,8 @@ def main():
     try:
         results["VALIDATION"] = _compare_validation()
         results["PATH POLICY"] = _compare_path_policy()
+        results["ENVIRONMENT"] = _compare_environment()
+        results["PROXY"] = _compare_proxy()
     except Exception:
         # A comparison failure is reported as FAIL, without exposing paths or
         # exception text that might contain local data.
@@ -122,6 +124,47 @@ def _compare_path_policy():
             core.profile_path_from_metadata, "profiles/profile_0001", paths
         )
         return legacy_serialized == revamped_serialized and legacy_resolved == revamped_resolved
+
+
+def _compare_environment():
+    legacy = _load_legacy()
+    records = [
+        {},
+        {"environment_preset": "default"},
+        {"environment_preset": "mobile"},
+        {"environment_preset": "custom", "environment_config": {"width": 1200, "height": 800, "scale_factor": 1.5, "language": "en-US", "mobile_mode": True, "touch_mode": False, "timezone": "UTC"}},
+        {"environment_preset": "custom", "environment_config": ["broken"]},
+    ]
+    for record in records:
+        if environment.effective_environment(record) != legacy.effective_environment(record):
+            return False
+        if environment.environment_launch_arguments(record) != legacy.environment_launch_arguments(record):
+            return False
+    return True
+
+
+def _compare_proxy():
+    legacy = _load_legacy()
+    records = [
+        {"proxy_enabled": False},
+        {"proxy_enabled": True, "proxy_scheme": "https", "proxy_host": "proxy.example", "proxy_port": 443},
+        {"proxy_enabled": True, "proxy_scheme": "socks5", "proxy_host": "2001:db8::1", "proxy_port": 1080},
+        {"proxy_enabled": True, "proxy_scheme": "unknown", "proxy_host": "bad host", "proxy_port": []},
+    ]
+    for record in records:
+        if proxy.effective_proxy(record) != legacy.effective_proxy(record):
+            return False
+        if proxy.proxy_launch_arguments(record) != legacy.proxy_launch_arguments(record):
+            return False
+    for value in (
+        "proxy.example:8080",
+        "socks5://proxy.example:1080",
+        "https://user:password@secure-proxy.example:443",
+        "proxy.example:8080:user:pa:ss",
+    ):
+        if proxy.parse_proxy_string(value) != legacy.parse_proxy_string(value):
+            return False
+    return True
 
 
 if __name__ == "__main__":
