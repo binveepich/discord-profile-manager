@@ -172,7 +172,7 @@ if __name__ == "__main__":
 
 ## M10 — Verification workflow
 
-Status: TODO
+Status: COMPLETE
 
 ### Objective
 
@@ -213,14 +213,14 @@ AUTONOMOUS GATE: PASS
 
 ### Acceptance criteria
 
-- [ ] `scripts/verify.py` exists.
-- [ ] Syntax check is included.
-- [ ] Unit test discovery is included.
-- [ ] PASS/FAIL summary is clear.
-- [ ] Script does not print credentials, raw logs, raw account config, raw metadata, or profile contents.
-- [ ] Script returns a non-zero exit code on failure.
-- [ ] Full unit test suite passes.
-- [ ] M10 is committed separately.
+- [x] `scripts/verify.py` exists.
+- [x] Syntax check is included.
+- [x] Unit test discovery is included.
+- [x] PASS/FAIL summary is clear.
+- [x] Script does not print credentials, raw logs, raw account config, raw metadata, or profile contents.
+- [x] Script returns a non-zero exit code on failure.
+- [x] Full unit test suite passes (170 tests).
+- [x] M10 is committed separately.
 
 ---
 

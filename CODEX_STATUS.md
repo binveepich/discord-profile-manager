@@ -70,16 +70,16 @@ Required before completion:
 
 ### M10 — Verification workflow
 
-Status: TODO
+Status: COMPLETE
 
 Required before completion:
 
-- [ ] `scripts/verify.py` exists
-- [ ] syntax check included
-- [ ] unit test runner included
-- [ ] safe PASS/FAIL summary
-- [ ] full unit suite PASS
-- [ ] commit created
+- [x] `scripts/verify.py` exists
+- [x] syntax check included
+- [x] unit test runner included
+- [x] safe PASS/FAIL summary
+- [x] full unit suite PASS (170 tests)
+- [x] commit created
 
 ### M11 — Manual acceptance documentation
 
