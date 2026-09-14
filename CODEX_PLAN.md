@@ -226,7 +226,7 @@ AUTONOMOUS GATE: PASS
 
 ## M11 — Manual acceptance documentation
 
-Status: TODO
+Status: COMPLETE
 
 ### Objective
 
@@ -251,15 +251,15 @@ Not allowed:
 
 ### Acceptance criteria
 
-- [ ] `docs/MANUAL_ACCEPTANCE.md` exists.
-- [ ] Checklist uses disposable profiles.
-- [ ] Startup/create/open/isolation/rename/delete/import checks are included.
-- [ ] M7 environment checks are included.
-- [ ] M8 proxy checks are included.
-- [ ] Automated unit tests, optional smoke tests, manual GUI checks, and Discord behavior are clearly separated.
-- [ ] Docs do not claim unperformed manual verification.
-- [ ] Full unit test suite passes.
-- [ ] M11 is committed separately.
+- [x] `docs/MANUAL_ACCEPTANCE.md` exists.
+- [x] Checklist uses disposable profiles.
+- [x] Startup/create/open/isolation/rename/delete/import checks are included.
+- [x] M7 environment checks are included.
+- [x] M8 proxy checks are included.
+- [x] Automated unit tests, optional smoke tests, manual GUI checks, and Discord behavior are clearly separated.
+- [x] Docs do not claim unperformed manual verification.
+- [x] Full unit test suite passes (170 tests).
+- [x] M11 is committed separately.
 
 ---
 

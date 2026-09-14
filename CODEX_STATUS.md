@@ -83,17 +83,17 @@ Required before completion:
 
 ### M11 — Manual acceptance documentation
 
-Status: TODO
+Status: COMPLETE
 
 Required before completion:
 
-- [ ] `docs/MANUAL_ACCEPTANCE.md` exists
-- [ ] disposable profile checklist included
-- [ ] M7 environment checks included
-- [ ] M8 proxy checks included
-- [ ] automated/smoke/manual/Discord checks separated
-- [ ] full unit suite PASS
-- [ ] commit created
+- [x] `docs/MANUAL_ACCEPTANCE.md` exists
+- [x] disposable profile checklist included
+- [x] M7 environment checks included
+- [x] M8 proxy checks included
+- [x] automated/smoke/manual/Discord checks separated
+- [x] full unit suite PASS (170 tests)
+- [x] commit created
 
 ### M12 — Packaging
 

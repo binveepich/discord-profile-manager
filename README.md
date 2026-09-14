@@ -193,126 +193,14 @@ initialization with a sharing violation (`0x20`) and exit with `0x80000003` befo
 the fixture page loads. This is an environment-specific smoke-test limitation;
 normal GUI launches through the manager should be validated separately.
 
-## Exact manual acceptance checks
+## Manual acceptance
 
-Use disposable profiles for creation, account import, rename, and deletion.
-Close a disposable profile's browser windows before deleting it.
+Use the current source-review checklist in
+[`docs/MANUAL_ACCEPTANCE.md`](docs/MANUAL_ACCEPTANCE.md). It separates automated
+unit tests, the optional real-Chromium smoke test, visible GUI checks, and
+optional real Discord behavior. It also includes disposable-profile instructions,
+M7 environment checks, M8 proxy checks, missing-runtime behavior, and migration
+safety checks.
 
-1. **Startup:** Run the command above. Confirm the existing manager window opens.
-2. **Create and launch:** Create `M1 Test A` and `M1 Test B`; decline account setup.
-   Select only `M1 Test A`, click Open Discord, and confirm Discord opens. Visit
-   `chrome://version` in that window. Its executable path must end with
-   `Discord_Profile_Manager\browser\chrome.exe`; for this fresh profile, its
-   profile path should end with `profiles\profile_####\Default`. Record the ID.
-3. **Isolation:** Add a harmless bookmark named `M1 A marker` in A. Open B from
-   the manager while A is still open. Verify a different `profile_####` path in
-   `chrome://version` and that B does not contain A's bookmark.
-4. **Rename and restart:** Close both browser windows. Rename A to
-   `M1 Test A renamed`. Close and restart the manager, then open the renamed
-   profile. Its ID/path and bookmark must be unchanged.
-5. **Account import:** In PowerShell at the project root, create a synthetic file:
-
-   ```powershell
-   New-Item -ItemType Directory -Path .\tmp -Force | Out-Null
-   @'
-   m1-one@example.invalid:synthetic-password-one
-   m1-two@example.invalid:synthetic-password-two
-   '@ | Set-Content -LiteralPath .\tmp\m1-accounts.txt -Encoding ASCII
-   ```
-
-   Click Import TXT and choose `tmp\m1-accounts.txt`. Confirm two profiles are
-   added with numbered names containing `m1-one` and `m1-two`. Use View Account
-   to verify the respective synthetic email addresses. Restart the manager and
-   confirm they remain assigned.
-6. **Extension loading:** Open one imported test profile. Visit
-   `chrome://extensions` and confirm Discord Autofill is loaded. Visit Discord's
-   login page and check that the synthetic fields are populated; do not submit
-   them. Confirm the other imported profile uses its own synthetic account.
-7. **Deletion:** Close the test profile's browser windows. Select only `M1 Test B`,
-   click Delete, and first cancel. Confirm it remains. Repeat and confirm deletion.
-   Restart the manager and verify B is gone while A and the imported tests remain.
-   Remove remaining disposable profiles only when you are finished testing.
-8. **Different working directory:** Close the manager and run:
-
-   ```powershell
-   Set-Location -LiteralPath 'I:\Discord_Profile_Manager\config'
-   python -B '..\legacy\profile_manager.py'
-   ```
-
-   Confirm the same profiles appear and launching still finds root `browser/chrome.exe`.
-9. **Missing runtime, without changing the real browser:** Close the manager and
-   create a script-only test copy inside the workspace:
-
-   ```powershell
-   Set-Location -LiteralPath 'I:\Discord_Profile_Manager'
-   New-Item -ItemType Directory -Path '.\tmp\M1 Missing Browser\legacy' -Force | Out-Null
-   Copy-Item -LiteralPath '.\legacy\profile_manager.py' -Destination '.\tmp\M1 Missing Browser\legacy\profile_manager.py'
-   python -B '.\tmp\M1 Missing Browser\legacy\profile_manager.py'
-   ```
-
-   Do not copy a runtime into this test folder. Expect a `Browser runtime not found`
-   dialog mentioning
-   `I:\Discord_Profile_Manager\tmp\M1 Missing Browser\browser\chrome.exe`.
-   Dismiss it; the process should finish without a traceback or a console input
-   prompt. The real `browser/` and `legacy/data/` directories are unaffected.
-
-Actual session preservation for an older external installation still requires
-validation against its known browser profile path. M3 only migrates registered
-profiles found under this application's `legacy/data/` root; it does not guess
-external storage layouts.
-
-## Additional M2 manual checklist
-
-Use the disposable profiles from the checklist above. For intentional metadata or
-directory damage, use a separate disposable application copy with no real accounts.
-
-1. Select A and B together with Ctrl-click and Open. Confirm two distinct profile
-   paths in `chrome://version`; repeat Open and confirm they are reported as already
-   running instead of launching duplicate instances.
-2. Keep both browsers open, close/restart the manager, then attempt to delete A.
-   Expect a close-Chromium message and no loss of either profile. Close A and retry;
-   B must remain intact and usable.
-3. Rename a running disposable profile. Its manager label should change while its
-   browser path and stored bookmark remain unchanged. Close/reopen Chromium and
-   confirm persistence.
-4. In the disposable application copy, close browsers and temporarily rename one
-   registered profile directory to an unused backup name. Select that profile and
-   a valid profile together, then Open. Expect an error for the missing directory,
-   no replacement directory, and a successful launch request for the valid one.
-   Restore the original directory name while browsers are closed and retry.
-5. In that copy only, back up `legacy/data/Local State`, replace it with invalid JSON,
-   and restart. Expect a clear metadata error. Try Create: the invalid file must
-   remain unchanged. Restore the exact backup and Refresh; profiles should return.
-6. Test a disposable `Default` entry and a project folder containing spaces/Unicode.
-   Verify selection, rename, opening, and confirmed deletion work for the intended ID.
-7. Test an approved copy of an existing independent legacy user-data root. Confirm
-   the original `chrome://version` profile path, bookmark, and storage survive restart.
-   A shared-root subprofile or ambiguous layout must show an explanatory error and
-   remain untouched.
-
-## M3 migration manual checklist
-
-Use a disposable copy of a registered legacy profile. Back up `legacy/data/Local State`
-before testing migration.
-
-1. Start with a registered profile whose directory is under `legacy/data/<ID>`.
-   Open it once and verify its cookies/bookmark, then close Chromium.
-2. In a Python console from the project root, call
-   `ProfileManager().migrate_profile(<ID>)` using the profile's exact ID. Confirm it
-   reports a `profile_####` ID, creates `profiles\profile_####`, and leaves the
-   original `legacy\data\<ID>` directory and its files unchanged.
-3. Restart the manager and open the migrated profile. In `chrome://version`, confirm
-   the user-data path is the new `profiles\profile_####` directory and the original
-   browser data remains available.
-4. Call the migration operation again for the same ID. It must return the same
-   managed ID without creating a second copy.
-5. Create another profile and confirm it uses the next collision-free
-   `profiles\profile_####` directory. Put an unrelated `profile_####` folder in
-   `profiles/` and confirm the next created profile does not overwrite it.
-6. With Chromium closed, temporarily replace the destination with a file or make
-   the source unreadable in a disposable copy. Retry migration and confirm a clear
-   error, an unchanged legacy source, and no metadata marker pointing at a missing
-   destination. Restore the backup before continuing.
-7. Delete a migrated disposable profile through the GUI. Confirm only its active
-   `profiles\profile_####` copy is removed; the original legacy source remains because
-   migration was copy-only.
+Do not treat automated tests as proof of GUI or Discord behavior, and do not start
+packaging until the user explicitly approves the source-code version.
