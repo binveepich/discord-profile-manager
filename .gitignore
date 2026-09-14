@@ -17,10 +17,12 @@ __pycache__/
 # User profiles, sessions, and local application data
 /profiles/
 /data/
+/legacy/data/
 
 # Logs
 /logs/
 /log/
+/legacy/log/
 *.log
 
 # Credentials and account data

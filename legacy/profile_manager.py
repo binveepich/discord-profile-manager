@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Ungoogled Chromium Portable Profile Manager
-Professional profile manager for ungoogled-chromium-portable
+Ungoogled Chromium Profile Manager
+Launches the bundled browser/chrome.exe runtime directly
 Supports multiple Discord accounts with auto-fill extension
 """
 
@@ -19,16 +19,24 @@ import logging
 from datetime import datetime
 import signal
 import psutil
+import math
+import stat
+import tempfile
+import uuid
+from contextlib import contextmanager
+from pathlib import PureWindowsPath
 
 # ----------------------------------------------------------------------
 # Configuration and Paths
 # ----------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
-LAUNCHER = BASE_DIR / "ungoogled-chromium-portable.exe"
+PROJECT_ROOT = BASE_DIR.parent
+BROWSER_EXE = PROJECT_ROOT / "browser" / "chrome.exe"
+# Keep the existing profile data and Local State locations.
 DATA_DIR = BASE_DIR / "data"
 LOG_DIR = BASE_DIR / "log"
-EXT_DIR = BASE_DIR / "ext" / "discord-autofill-extension"
-TOKEN_EXT_DIR = BASE_DIR / "ext" / "discord-token-extractor-extension"
+EXT_DIR = PROJECT_ROOT / "extensions" / "discord-autofill-extension"
+TOKEN_EXT_DIR = PROJECT_ROOT / "extensions" / "discord-token-extractor-extension"
 LOCAL_STATE = DATA_DIR / "Local State"
 
 # Ensure log directory exists
@@ -65,6 +73,80 @@ class InvalidAccountFormatError(ProfileManagerError):
     """Invalid account format for Discord credentials"""
     pass
 
+
+def validate_profile_id(profile_id):
+    """Reject Windows path aliases and paths that could address another profile."""
+    if (not isinstance(profile_id, str) or not profile_id
+            or profile_id != profile_id.strip() or profile_id.endswith('.')
+            or profile_id in ('.', '..') or profile_id.startswith('.deleting-')
+            or any(char in '<>:"/\\|?*' or ord(char) < 32 for char in profile_id)
+            or PureWindowsPath(profile_id).is_reserved()):
+        raise ProfileManagerError("Invalid profile ID in metadata. Restore or correct Local State before continuing.")
+    return profile_id
+
+
+def checked_path(path, root):
+    """Require containment and reject symlinks/junctions along the managed path."""
+    path, root = Path(path).absolute(), Path(root).absolute()
+    if not path.is_relative_to(root):
+        raise ProfileManagerError("Profile path is outside its data directory.")
+    for item in [root, *[root.joinpath(*path.relative_to(root).parts[:i])
+                         for i in range(1, len(path.relative_to(root).parts) + 1)]]:
+        try:
+            info = item.lstat()
+        except FileNotFoundError:
+            continue
+        reparse_point = getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)
+        if stat.S_ISLNK(info.st_mode) or reparse_point and getattr(info, 'st_file_attributes', 0) & reparse_point:
+            raise ProfileManagerError(f"Linked profile paths are not supported: {item}")
+    if not path.resolve().is_relative_to(root.resolve()):
+        raise ProfileManagerError("Profile path resolves outside its data directory.")
+    return path
+
+
+def browser_using_directory(directory, exact=False):
+    """Check live processes, including browsers started before this manager."""
+    directory = Path(directory).resolve()
+    try:
+        for process in psutil.process_iter(['name']):
+            if (process.info.get('name') or '').lower() not in ('chrome.exe', 'chromium.exe', 'chrome', 'chromium'):
+                continue
+            try:
+                owner = process
+                # Sandboxed renderers can deny cmdline access on Windows. Their
+                # browser parent still identifies the user-data root reliably.
+                for _ in range(10):
+                    try:
+                        args = owner.cmdline()
+                        break
+                    except psutil.AccessDenied:
+                        owner = owner.parent()
+                        if owner is None or owner.name().lower() not in ('chrome.exe', 'chromium.exe', 'chrome', 'chromium'):
+                            raise
+                else:
+                    raise ProfileManagerError("Cannot identify a Chromium process's profile. Close Chromium and retry.")
+                for index, argument in enumerate(args):
+                    value = None
+                    if argument.startswith('--user-data-dir='):
+                        value = argument.split('=', 1)[1]
+                    elif argument == '--user-data-dir' and index + 1 < len(args):
+                        value = args[index + 1]
+                    if value:
+                        candidate = Path(value.strip('"'))
+                        if not candidate.is_absolute():
+                            candidate = Path(owner.cwd()) / candidate
+                        candidate = candidate.resolve()
+                        if candidate == directory or (not exact and (
+                                directory.is_relative_to(candidate) or candidate.is_relative_to(directory))):
+                            return True
+            except psutil.NoSuchProcess:
+                continue
+            except (psutil.AccessDenied, OSError):
+                raise ProfileManagerError("Cannot verify whether Chromium is using this profile. Close Chromium and retry.")
+    except (psutil.Error, OSError) as error:
+        raise ProfileManagerError("Cannot check running Chromium processes. Retry after closing Chromium.") from error
+    return False
+
 # ----------------------------------------------------------------------
 # Local State Management
 # ----------------------------------------------------------------------
@@ -73,40 +155,116 @@ class LocalStateManager:
     
     def __init__(self):
         self.local_state_path = LOCAL_STATE
+        self._loaded_bytes = None
+
+    @contextmanager
+    def operation(self):
+        """Serialize manager mutations/launches across application instances."""
+        directory = checked_path(self.local_state_path.parent, DATA_DIR)
+        directory.mkdir(parents=True, exist_ok=True)
+        lock_path = checked_path(directory / '.manager.lock', directory)
+        with open(lock_path, 'a+b') as lock:
+            lock.seek(0, os.SEEK_END)
+            if lock.tell() == 0:
+                lock.write(b'0')
+                lock.flush()
+            lock.seek(0)
+            if sys.platform == 'win32':
+                import msvcrt
+                acquire = lambda: msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                release = lambda: msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                acquire = lambda: fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                release = lambda: fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            try:
+                acquire()
+            except OSError as error:
+                raise ProfileManagerError("Another profile operation is in progress. Please retry.") from error
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                release()
+
+    def _validate(self, data):
+        if not isinstance(data, dict) or not isinstance(data.get('profile'), dict):
+            raise ValueError('Expected a profile object')
+        cache = data['profile'].get('info_cache')
+        if not isinstance(cache, dict):
+            raise ValueError('Expected profile.info_cache object')
+        seen = set()
+        for pid, info in cache.items():
+            validate_profile_id(pid)
+            if pid.casefold() in seen:
+                raise ValueError('Profile IDs refer to the same Windows directory')
+            seen.add(pid.casefold())
+            if not isinstance(info, dict) or not isinstance(info.get('name', pid), str):
+                raise ValueError('Invalid profile entry or name')
+            created = info.get('created', 0)
+            if (isinstance(created, bool) or not isinstance(created, (int, float))
+                    or created < 0 or created > 2**63 - 1 or not math.isfinite(created)):
+                raise ValueError('Invalid profile creation timestamp')
+        return data
+
+    @staticmethod
+    def _unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate metadata key')
+            result[key] = value
+        return result
         
     def load(self):
-        """Read and parse Local State JSON file"""
-        if not self.local_state_path.exists():
-            logger.warning(f"Local State not found at {self.local_state_path}, creating default")
-            return self._create_default()
-        
+        """Read metadata without replacing unreadable or malformed existing data."""
         try:
-            with open(self.local_state_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            logger.debug("Local State loaded successfully")
+            checked_path(self.local_state_path, DATA_DIR)
+            if not self.local_state_path.exists():
+                directory = self.local_state_path.parent
+                existing = [path for path in directory.iterdir()
+                            if path.name != '.manager.lock'] if directory.exists() else []
+                if existing:
+                    raise ProfileManagerError(f"Profile metadata is missing, but existing data remains at {directory}. Restore Local State before continuing.")
+                self._loaded_bytes = None
+                return self._create_default()
+            raw = self.local_state_path.read_bytes()
+            data = self._validate(json.loads(raw.decode('utf-8-sig'), object_pairs_hook=self._unique_keys))
+            self._loaded_bytes = raw
             return data
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in Local State: {e}")
-            # Attempt to recover by creating backup and default
-            backup_path = self.local_state_path.with_suffix('.json.bak')
-            shutil.copy2(self.local_state_path, backup_path)
-            logger.info(f"Corrupted Local State backed up to {backup_path}")
-            return self._create_default()
-        except Exception as e:
-            logger.error(f"Unexpected error loading Local State: {e}")
-            return self._create_default()
+        except (OSError, ValueError, UnicodeError) as error:
+            raise ProfileManagerError(
+                f"Cannot read profile metadata: {self.local_state_path}. The file was left unchanged; restore or correct it before continuing."
+            ) from error
     
     def save(self, data):
         """Safely write Local State JSON file"""
+        temp_path = None
         try:
-            temp_path = self.local_state_path.with_suffix('.tmp')
-            with open(temp_path, 'w', encoding='utf-8') as f:
+            self._validate(data)
+            checked_path(self.local_state_path, DATA_DIR)
+            current = self.local_state_path.read_bytes() if self.local_state_path.exists() else None
+            if current != self._loaded_bytes:
+                raise ProfileManagerError("Profile metadata changed during this operation. Refresh and retry.")
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=self.local_state_path.parent,
+                                             prefix='.local-state-', suffix='.tmp', delete=False) as f:
+                temp_path = Path(f.name)
                 json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            new_bytes = temp_path.read_bytes()
             temp_path.replace(self.local_state_path)
+            self._loaded_bytes = new_bytes
             logger.debug("Local State saved successfully")
         except Exception as e:
             logger.error(f"Failed to save Local State: {e}")
             raise ProfileManagerError(f"Cannot save Local State: {e}")
+        finally:
+            if temp_path is not None and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    logger.warning("Could not remove a temporary metadata file")
     
     def _create_default(self):
         """Create default Local State structure"""
@@ -147,10 +305,11 @@ class ProfileManager:
     
     def next_profile_id(self, cache):
         """Generate next profile ID following Profile X pattern"""
-        pattern = re.compile(r"^Profile (\d+)$")
+        pattern = re.compile(r"^Profile (\d+)$", re.IGNORECASE)
         max_num = 0
         
-        for pid in cache.keys():
+        # Reserve orphaned directories and files as well as registered IDs.
+        for pid in [*cache, *[path.name for path in DATA_DIR.iterdir()]]:
             if pid == "Default":
                 continue
             m = pattern.match(pid)
@@ -163,41 +322,34 @@ class ProfileManager:
     
     def create_profile(self, display_name=None):
         """Create a new profile and initialize it"""
-        logger.info(f"Creating new profile with name: {display_name}")
-        
-        # Load Local State
-        data = self.local_state.load()
-        cache = data.setdefault("profile", {}).setdefault("info_cache", {})
-        
-        # Generate new profile ID
-        new_id = self.next_profile_id(cache)
-        if display_name is None:
-            display_name = new_id
-        
-        # Add to cache
-        cache[new_id] = {
-            "name": display_name,
-            "avatar_icon": "chrome/theme/IDR_PROFILE_AVATAR_0",
-            "created": int(time.time())
-        }
-        
-        # Save Local State
-        self.local_state.save(data)
-        
-        # Initialize profile structure
-        self._initialize_profile_structure(new_id)
-        
-        logger.info(f"Profile {new_id} created successfully")
-        return new_id
+        if display_name is not None and (not isinstance(display_name, str) or not display_name.strip()):
+            raise ProfileManagerError("Profile name must not be empty.")
+        with self.local_state.operation():
+            self._check_registry_idle()
+            data = self.local_state.load()
+            cache = data['profile']['info_cache']
+            new_id = self.next_profile_id(cache)
+            self._initialize_profile_structure(new_id)
+            cache[new_id] = {
+                'name': display_name.strip() if display_name is not None else new_id,
+                'avatar_icon': 'chrome/theme/IDR_PROFILE_AVATAR_0',
+                'created': int(time.time()),
+            }
+            # Publish only after initialization. Failed creations are never reused.
+            self.local_state.save(data)
+            logger.info(f"Profile {new_id} created successfully")
+            return new_id
     
     def _initialize_profile_structure(self, profile_id):
         """Create minimal Chromium profile structure without launching browser"""
 
-        profile_dir = DATA_DIR / profile_id
-        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir = self.get_profile_dir(profile_id)
+        profile_dir.mkdir(exist_ok=False)
 
         # Minimal Preferences file
-        prefs_file = profile_dir / "Preferences"
+        browser_profile = profile_dir / 'Default'
+        browser_profile.mkdir()
+        prefs_file = browser_profile / "Preferences"
 
         if not prefs_file.exists():
             minimal_prefs = {
@@ -239,41 +391,105 @@ class ProfileManager:
     
     def rename_profile(self, profile_id, new_name):
         """Rename a profile"""
-        logger.info(f"Renaming profile {profile_id} to {new_name}")
-        
-        data = self.local_state.load()
-        cache = data.get("profile", {}).get("info_cache", {})
-        
-        if profile_id not in cache:
-            raise ProfileNotFoundError(f"Profile {profile_id} not found")
-        
-        cache[profile_id]["name"] = new_name
-        self.local_state.save(data)
+        if not isinstance(new_name, str) or not new_name.strip():
+            raise ProfileManagerError("Profile name must not be empty.")
+        with self.local_state.operation():
+            self._check_registry_idle()
+            self.require_profile_dir(profile_id)
+            data = self.local_state.load()
+            data['profile']['info_cache'][profile_id]['name'] = new_name.strip()
+            self.local_state.save(data)
         logger.info(f"Profile {profile_id} renamed to {new_name}")
     
     def delete_profile(self, profile_id):
         """Delete a profile and its data"""
-        logger.info(f"Deleting profile {profile_id}")
-        
-        data = self.local_state.load()
-        cache = data.get("profile", {}).get("info_cache", {})
-        
-        if profile_id not in cache:
-            raise ProfileNotFoundError(f"Profile {profile_id} not found")
-        
-        # Remove from cache
-        del cache[profile_id]
-        self.local_state.save(data)
-        
-        # Delete profile directory
-        profile_dir = DATA_DIR / profile_id
-        if profile_dir.exists() and profile_dir.is_dir():
-            shutil.rmtree(profile_dir)
-            logger.info(f"Deleted profile directory: {profile_dir}")
+        with self.local_state.operation():
+            self._check_registry_idle()
+            data = self.local_state.load()
+            cache = data['profile']['info_cache']
+            if profile_id not in cache:
+                raise ProfileNotFoundError(f"Profile {profile_id} not found")
+            profile_dir = self.get_profile_dir(profile_id)
+            if browser_using_directory(profile_dir):
+                raise ProfileManagerError(f"Close Chromium for {profile_id} before deleting it.")
+            pending = None
+            if profile_dir.exists():
+                if not profile_dir.is_dir():
+                    raise ProfileManagerError(f"Profile path is not a directory: {profile_dir}")
+                pending = checked_path(DATA_DIR / f'.deleting-{profile_id}-{uuid.uuid4().hex}', DATA_DIR)
+                profile_dir.rename(pending)
+            else:
+                self._check_pending_delete(profile_id)
+            del cache[profile_id]
+            try:
+                self.local_state.save(data)
+            except Exception:
+                if pending is not None:
+                    if profile_dir.exists():
+                        raise ProfileManagerError(f"Deletion was interrupted. Profile data is preserved at {pending}; restore it before retrying.")
+                    pending.rename(profile_dir)
+                raise
+            if pending is not None:
+                # Resolve and verify the recursive deletion target immediately beforehand.
+                checked_path(pending, DATA_DIR)
+                try:
+                    shutil.rmtree(pending)
+                except OSError as error:
+                    raise ProfileManagerError(f"Profile was removed from the list, but some data could not be deleted at {pending}. No further cleanup will run automatically.") from error
+            logger.info(f"Deleted profile {profile_id}")
     
     def get_profile_dir(self, profile_id):
         """Get profile directory path"""
-        return DATA_DIR / profile_id
+        return checked_path(DATA_DIR / validate_profile_id(profile_id), DATA_DIR)
+
+    def _check_registry_idle(self):
+        if browser_using_directory(DATA_DIR, exact=True):
+            raise ProfileManagerError("Chromium is using the shared legacy data directory. Close it before using the manager.")
+
+    def _check_pending_delete(self, profile_id):
+        if not DATA_DIR.exists():
+            return
+        for path in DATA_DIR.iterdir():
+            if path.name.startswith(f'.deleting-{profile_id}-'):
+                raise ProfileManagerError(f"An interrupted deletion left data at {path}. Restore or inspect that directory before continuing.")
+
+    def require_profile_dir(self, profile_id):
+        path = self.get_profile_dir(profile_id)
+        if profile_id not in self.local_state.load()['profile']['info_cache']:
+            raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+        if not path.is_dir():
+            self._check_pending_delete(profile_id)
+            raise ProfileNotFoundError(f"Profile directory is missing or invalid: {path}. Restore it before opening; no replacement profile was created.")
+        return path
+
+    def get_browser_profile_dir(self, profile_id):
+        """Validate an existing independent user-data root without migrating it."""
+        root = self.require_profile_dir(profile_id)
+        flat_markers = ('Cookies', 'Network', 'Local Storage', 'IndexedDB', 'Login Data',
+                        'History', 'Bookmarks', 'Sessions', 'Session Storage', 'Web Data', 'Service Worker')
+        if any((root / marker).exists() for marker in flat_markers):
+            raise ProfileManagerError(f"Legacy browser data is directly inside {root}. This appears to be a shared-root subprofile, not an isolated user-data directory. M2 will not relocate it or open an empty replacement.")
+        browser_state = checked_path(root / 'Local State', root)
+        last_used = 'Default'
+        if browser_state.exists():
+            try:
+                data = json.loads(browser_state.read_text(encoding='utf-8-sig'), object_pairs_hook=LocalStateManager._unique_keys)
+                if not isinstance(data, dict) or not isinstance(data.get('profile', {}), dict):
+                    raise ValueError('Invalid browser Local State')
+                last_used = validate_profile_id(data.get('profile', {}).get('last_used', 'Default'))
+            except (OSError, ValueError, UnicodeError) as error:
+                raise ProfileManagerError(f"Cannot read Chromium state at {browser_state}. Restore it before opening this profile.") from error
+        browser_profile = checked_path(root / last_used, root)
+        if last_used != 'Default' and not browser_profile.is_dir():
+            raise ProfileManagerError(f"Chromium's last-used profile directory is missing: {browser_profile}")
+        if not browser_profile.exists():
+            for child in root.iterdir():
+                if child.is_dir() and child.name != 'Unpacked Extensions' and (child / 'Preferences').exists():
+                    raise ProfileManagerError(f"Ambiguous Chromium profile layout at {root}. No new profile will be created.")
+        elif not browser_profile.is_dir():
+            raise ProfileManagerError(f"Chromium profile path is not a directory: {browser_profile}")
+        checked_path(browser_profile / 'Preferences', root)
+        return browser_profile
 
 # ----------------------------------------------------------------------
 # Extension and Account Management
@@ -286,16 +502,16 @@ class AccountManager:
     
     def _ensure_both_extensions_installed(self, profile_id):
         """Ensure both extensions are installed in profile"""
-        profile_dir = self.profile_manager.get_profile_dir(profile_id)
+        profile_dir = self.profile_manager.require_profile_dir(profile_id)
         
         # Create Extensions folder if not exists
-        extensions_dir = profile_dir / "Unpacked Extensions"
+        extensions_dir = checked_path(profile_dir / "Unpacked Extensions", profile_dir)
         extensions_dir.mkdir(parents=True, exist_ok=True)
         
         installed_exts = []
         
         # Install Discord Autofill Extension
-        autofill_target = extensions_dir / "discord-autofill-extension"
+        autofill_target = checked_path(extensions_dir / "discord-autofill-extension", profile_dir)
         if EXT_DIR.exists():
             if not autofill_target.exists():
                 shutil.copytree(EXT_DIR, autofill_target)
@@ -305,7 +521,7 @@ class AccountManager:
             raise ExtensionNotFoundError(f"Autofill extension not found at {EXT_DIR}")
         
         # Install Token Extractor Extension
-        token_target = extensions_dir / "discord-token-extractor-extension"
+        token_target = checked_path(extensions_dir / "discord-token-extractor-extension", profile_dir)
         if TOKEN_EXT_DIR.exists():
             if not token_target.exists():
                 shutil.copytree(TOKEN_EXT_DIR, token_target)
@@ -321,12 +537,12 @@ class AccountManager:
         """Get path to config.js for profile"""
         profile_dir = self.profile_manager.get_profile_dir(profile_id)
         ext_dir = profile_dir / "Unpacked Extensions" / "discord-autofill-extension"
-        return ext_dir / "config.js"
+        return checked_path(ext_dir / "config.js", profile_dir)
     
     def _ensure_extension_installed(self, profile_id):
         """Ensure extension is installed in profile"""
-        profile_dir = self.profile_manager.get_profile_dir(profile_id)
-        ext_target = profile_dir / "Unpacked Extensions" / "discord-autofill-extension"
+        profile_dir = self.profile_manager.require_profile_dir(profile_id)
+        ext_target = checked_path(profile_dir / "Unpacked Extensions" / "discord-autofill-extension", profile_dir)
         
         # Create Extensions folder if not exists
         ext_target.parent.mkdir(parents=True, exist_ok=True)
@@ -344,8 +560,10 @@ class AccountManager:
     
     def _enable_developer_mode(self, profile_id):
         """Enable developer mode in profile preferences"""
-        profile_dir = self.profile_manager.get_profile_dir(profile_id)
-        prefs_file = profile_dir / "Preferences"
+        profile_dir = self.profile_manager.require_profile_dir(profile_id)
+        if browser_using_directory(profile_dir):
+            raise ProfileManagerError("Close this profile's Chromium windows before configuring its account.")
+        prefs_file = self.profile_manager.get_browser_profile_dir(profile_id) / "Preferences"
         
         if not prefs_file.exists():
             logger.warning(f"Preferences not found for {profile_id}")
@@ -359,10 +577,10 @@ class AccountManager:
             # Set developer mode
             if "extensions" not in prefs:
                 prefs["extensions"] = {}
-            prefs["extensions"]["ui"] = {"developer_mode": True}
+            prefs["extensions"].setdefault("ui", {})["developer_mode"] = True
             
             # Write safely
-            temp_file = prefs_file.with_suffix('.tmp')
+            temp_file = checked_path(prefs_file.with_suffix('.tmp'), profile_dir)
             with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(prefs, f, indent=2)
             temp_file.replace(prefs_file)
@@ -416,7 +634,7 @@ class AccountManager:
     }};
     """
         
-        config_file = autofill_ext_path / "config.js"
+        config_file = self._get_config_path(profile_id)
         with open(config_file, 'w', encoding='utf-8') as f:
             f.write(config_content)
         
@@ -512,50 +730,59 @@ class ChromiumLauncher:
     """Handle Chromium launching with proper arguments"""
     
     def __init__(self):
-        self.launcher_path = LAUNCHER
+        self.launcher_path = BROWSER_EXE
+        self._processes = {}
         
     def launch_discord(self, profile_id, extension_paths=None):
         """Launch Discord with specified profile and multiple extensions"""
-        if not self.launcher_path.exists():
-            raise ProfileManagerError(f"Launcher not found: {self.launcher_path}")
-        
-        profile_data_dir = DATA_DIR / profile_id
-
-        cmd = [
-            str(self.launcher_path),
-            f"--user-data-dir={profile_data_dir}",
-            "--new-window",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-sync",
-            "--process-per-site",
-            "https://discord.com/app"
-        ]
-        
-        # Add extension arguments if paths provided
-        if extension_paths:
-            # Filter out None values and convert to strings
-            valid_paths = [str(p) for p in extension_paths if p and p.exists()]
-            if valid_paths:
-                ext_paths_str = ",".join(valid_paths)
-                cmd.extend([
-                    f"--disable-extensions-except={ext_paths_str}",
-                    f"--load-extension={ext_paths_str}"
-                ])
-        
-        logger.info(f"Launching Discord with profile {profile_id} and {len(valid_paths) if extension_paths else 0} extensions")
-        
-        try:
-            subprocess.Popen(
-                cmd,
-                shell=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        if not self.launcher_path.is_file():
+            raise ProfileManagerError(
+                f"Chromium browser runtime not found. Expected executable:\n{self.launcher_path}"
             )
-        except Exception as e:
-            logger.error(f"Failed to launch Chromium: {e}")
-            raise ProfileManagerError(f"Cannot launch Chromium: {e}")
+
+        profiles = ProfileManager()
+        with profiles.local_state.operation():
+            profiles._check_registry_idle()
+            profile_data_dir = profiles.require_profile_dir(profile_id)
+            previous = self._processes.get(profile_id)
+            if (previous is not None and previous.poll() is None) or browser_using_directory(profile_data_dir):
+                return False
+            profiles.get_browser_profile_dir(profile_id)
+
+            cmd = [
+                str(self.launcher_path),
+                f"--user-data-dir={profile_data_dir}",
+                "--new-window",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-sync",
+                "--process-per-site",
+                "https://discord.com/app"
+            ]
+
+            if extension_paths:
+                valid_paths = [str(checked_path(p, profile_data_dir)) for p in extension_paths if p and p.exists()]
+                if any(',' in path for path in valid_paths):
+                    raise ProfileManagerError("Extension paths containing commas cannot be loaded safely. Move the application folder to a path without commas.")
+                if valid_paths:
+                    joined = ','.join(valid_paths)
+                    cmd.extend([f"--disable-extensions-except={joined}", f"--load-extension={joined}"])
+
+            logger.info(f"Requesting Chromium launch for profile {profile_id}")
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    shell=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                if process.poll() not in (None, 0):
+                    raise ProfileManagerError(f"Chromium exited before opening profile {profile_id}.")
+                self._processes[profile_id] = process
+                return True
+            except OSError as error:
+                raise ProfileManagerError(f"Cannot launch Chromium: {error}") from error
 
 # ----------------------------------------------------------------------
 # GUI Application
@@ -905,7 +1132,13 @@ class ProfileManagerApp:
             return
 
         pid, _ = self.current_profile
-        account = self.account_manager.get_account(pid)
+        try:
+            account = self.account_manager.get_account(pid)
+        except (ProfileManagerError, OSError):
+            self.btn_set_account.config(state=tk.DISABLED)
+            self.btn_view_account.config(state=tk.DISABLED)
+            self.btn_remove_account.config(state=tk.DISABLED)
+            return
 
         if account:
             # Có account
@@ -919,24 +1152,25 @@ class ProfileManagerApp:
             self.btn_remove_account.config(state=tk.DISABLED)
 
     def on_select(self, event):
-        selection = self.tree.selection()
-        if selection:
-            # Get the first selected item
-            item = selection[0]
-            item_values = self.tree.item(item, "values")
-            # Find matching profile in self.profiles list
-            for pid, name in self.profiles:
-                if item_values[1] == pid and item_values[0] == f"👤 {name}":
-                    self.current_profile = (pid, name)
-                    break
-        else:
-            self.current_profile = None
-
+        selected = self.get_selected_profiles()
+        self.current_profile = selected[0] if len(selected) == 1 else None
         self.update_account_buttons()
+
+    def get_selected_profiles(self):
+        """Resolve selection by stable IDs, independently of row labels/icons."""
+        names = dict(self.profiles)
+        selected = []
+        seen = set()
+        for item in self.tree.selection():
+            values = self.tree.item(item, 'values')
+            if len(values) >= 2 and values[1] in names and values[1] not in seen:
+                selected.append((values[1], names[values[1]]))
+                seen.add(values[1])
+        return selected
     
     def get_selected_profile(self):
         """Get currently selected profile"""
-        selection = self.tree.selection()
+        selection = self.get_selected_profiles()
         if not selection:
             messagebox.showwarning("Chọn profile", "Vui lòng chọn một profile.")
             return None
@@ -946,13 +1180,7 @@ class ProfileManagerApp:
             messagebox.showwarning("Chọn một profile", "Vui lòng chỉ chọn một profile.")
             return None
             
-        item = selection[0]
-        item_values = self.tree.item(item, "values")
-        # Find matching profile
-        for pid, name in self.profiles:
-            if item_values[1] == pid and item_values[0] == f"👤 {name}":
-                return (pid, name)
-        return None
+        return selection[0]
     
     def update_status(self, message):
         """Update status bar message"""
@@ -965,6 +1193,7 @@ class ProfileManagerApp:
         self.update_status("Đang tải danh sách profile...")
         
         try:
+            selected_ids = {pid for pid, _ in self.get_selected_profiles()}
             # Load raw data from Local State
             data = self.profile_manager.local_state.load()
             cache = data.get("profile", {}).get("info_cache", {})
@@ -999,11 +1228,19 @@ class ProfileManagerApp:
             
             for pid, name in self.profiles:
                 prefix = "⭐" if pid == "Default" else "👤"
-                self.tree.insert("", "end", values=(f"{prefix} {name}", pid))
+                self.tree.insert("", "end", iid=pid, values=(f"{prefix} {name}", pid))
+
+            self.tree.selection_set([pid for pid, _ in self.profiles if pid in selected_ids])
+            self.on_select(None)
             
             self.update_status(f"Đã tải {len(self.profiles)} profiles")
             
         except Exception as e:
+            self.profiles = []
+            self.current_profile = None
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+            self.update_account_buttons()
             logger.error(f"Failed to refresh list: {e}")
             messagebox.showerror("Lỗi", f"Không thể tải profiles:\n{e}")
             self.update_status("Lỗi tải danh sách")
@@ -1069,19 +1306,11 @@ class ProfileManagerApp:
             self.update_status("Lỗi đổi tên")
     
     def delete_profile(self):
-        selections = self.tree.selection()
+        selected_profiles = self.get_selected_profiles()
 
-        if not selections:
+        if not selected_profiles:
             messagebox.showwarning("Chọn profile", "Vui lòng chọn profile.")
             return
-
-        selected_profiles = []
-        for item in selections:
-            item_values = self.tree.item(item, "values")
-            for pid, name in self.profiles:
-                if item_values[1] == pid and item_values[0] == f"👤 {name}":
-                    selected_profiles.append((pid, name))
-                    break
 
         confirm = messagebox.askyesno(
             "Xác nhận xóa",
@@ -1093,6 +1322,7 @@ class ProfileManagerApp:
             return
 
         deleted = 0
+        errors = []
 
         for pid, name in selected_profiles:
             try:
@@ -1100,46 +1330,38 @@ class ProfileManagerApp:
                 deleted += 1
             except Exception as e:
                 logger.error(f"Delete failed {pid}: {e}")
+                errors.append(f'{pid}: {e}')
 
         self.refresh_list()
         self.update_status(f"Đã xóa {deleted} profile")
+        if errors:
+            messagebox.showwarning('Some profiles could not be deleted', '\n\n'.join(errors[:10]))
     
     def open_discord(self):
-        """Open Discord with selected profile"""
-        profile = self.get_selected_profile()
-        if not profile:
+        """Open each selected profile separately and report partial failures."""
+        selected = self.get_selected_profiles()
+        if not selected:
+            messagebox.showwarning('Chọn profile', 'Vui lòng chọn profile.')
             return
-        
-        pid, name = profile
-        
-        try:
-            self.update_status(f"Đang mở Discord với profile {name}...")
-            
-            # Check and collect both extensions
-            profile_dir = self.profile_manager.get_profile_dir(pid)
-            extensions_dir = profile_dir / "Unpacked Extensions"
-            
-            extension_paths = []
-            
-            # Add autofill extension if exists
-            autofill_path = extensions_dir / "discord-autofill-extension"
-            if autofill_path.exists():
-                extension_paths.append(autofill_path)
-            
-            # Add token extractor extension if exists
-            token_path = extensions_dir / "discord-token-extractor-extension"
-            if token_path.exists():
-                extension_paths.append(token_path)
-            
-            # Launch with all found extensions
-            self.launcher.launch_discord(pid, extension_paths if extension_paths else None)
-            
-            self.update_status(f"Discord đã được mở với profile {name}")
-            
-        except Exception as e:
-            logger.error(f"Failed to open Discord: {e}")
-            messagebox.showerror("Lỗi", f"Không thể mở Discord:\n{e}")
-            self.update_status("Lỗi mở Discord")
+        requested, running, errors = 0, 0, []
+        for pid, name in selected:
+            try:
+                self.update_status(f"Đang mở Discord với profile {name}...")
+                profile_dir = self.profile_manager.get_profile_dir(pid)
+                extensions_dir = profile_dir / 'Unpacked Extensions'
+                extension_paths = [extensions_dir / name for name in
+                                   ('discord-autofill-extension', 'discord-token-extractor-extension')
+                                   if (extensions_dir / name).exists()]
+                if self.launcher.launch_discord(pid, extension_paths or None):
+                    requested += 1
+                else:
+                    running += 1
+            except Exception as error:
+                logger.error(f'Launch failed for {pid}: {error}')
+                errors.append(f'{pid}: {error}')
+        self.update_status(f'Launch requested: {requested}; already running: {running}; failed: {len(errors)}')
+        if errors:
+            messagebox.showerror('Could not open some profiles', '\n\n'.join(errors[:10]))
     
     def set_account(self):
         """Set account for selected profile"""
@@ -1494,30 +1716,37 @@ def main():
     """Main application entry point"""
     try:
         # Check prerequisites
-        if not LAUNCHER.exists():
-            logger.error(f"Launcher not found: {LAUNCHER}")
-            print(f"ERROR: Launcher not found at {LAUNCHER}")
-            print("Please ensure this script is in the root directory of ungoogled-chromium-portable.")
-            print(f"Current directory: {BASE_DIR}")
-            input("\nPress Enter to exit...")
-            sys.exit(1)
+        if not BROWSER_EXE.is_file():
+            error_message = (
+                "Chromium browser runtime not found.\n\n"
+                f"Expected executable:\n{BROWSER_EXE}\n\n"
+                "Keep the complete Ungoogled Chromium runtime in the project's browser folder."
+            )
+            logger.error(error_message)
+            error_root = tk.Tk()
+            error_root.withdraw()
+            try:
+                messagebox.showerror("Browser runtime not found", error_message, parent=error_root)
+            finally:
+                error_root.destroy()
+            return
         
         # Ensure data directory exists
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         
-        # Create minimal Local State if needed
-        if not LOCAL_STATE.exists():
-            logger.info("Creating minimal Local State")
-            minimal_state = {
-                "profile": {
-                    "info_cache": {}
-                }
-            }
-            with open(LOCAL_STATE, 'w', encoding='utf-8') as f:
-                json.dump(minimal_state, f, indent=2)
-        
         # Start application
         root = tk.Tk()
+
+        # Initialize only a genuinely fresh registry; never reset existing data.
+        try:
+            state = LocalStateManager()
+            with state.operation():
+                if not LOCAL_STATE.exists():
+                    state.save(state.load())
+        except ProfileManagerError as error:
+            messagebox.showerror('Profile metadata error', str(error), parent=root)
+            root.destroy()
+            return
         
         # Set icon if available
         try:
