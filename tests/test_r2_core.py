@@ -25,7 +25,7 @@ class CoreContractTests(unittest.TestCase):
         with DisposableWorkspace() as workspace:
             paths = ProjectPaths(workspace.root / "project with spaces")
             self.assertEqual(paths.browser_exe, paths.root / "browser" / "chrome.exe")
-            self.assertEqual(paths.local_state, paths.root / "legacy" / "data" / "Local State")
+            self.assertEqual(paths.local_state, paths.root / "data" / "Local State")
             self.assertEqual(paths.profiles_json, paths.root / "config" / "profiles.json")
 
     def test_profile_id_validation_matches_legacy_acceptance(self):
@@ -64,9 +64,9 @@ class CoreContractTests(unittest.TestCase):
             managed = paths.profiles_dir / "profile_0001"
             legacy = paths.data_dir / "Profile 1"
             self.assertEqual(metadata_path_for_profile(managed, paths), "profiles/profile_0001")
-            self.assertEqual(metadata_path_for_profile(legacy, paths), "legacy/data/Profile 1")
+            self.assertEqual(metadata_path_for_profile(legacy, paths), "data/Profile 1")
             self.assertEqual(profile_path_from_metadata("profiles/profile_0001", paths), managed.absolute())
-            self.assertEqual(profile_path_from_metadata("legacy\\data\\Profile 1", paths), legacy.absolute())
+            self.assertEqual(profile_path_from_metadata("data\\Profile 1", paths), legacy.absolute())
             for value in ("../outside", "C:/outside", "profiles/../outside", "other/profile"):
                 with self.subTest(value=value):
                     with self.assertRaises(ProfileManagerError):
@@ -89,4 +89,3 @@ class CoreContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -269,10 +269,64 @@ class ProfileService:
         preset, config = environment.effective_environment(record)
         return {"preset": preset, "environment_preset": preset, **dict(config)}
 
+    @staticmethod
+    def _normalized_proxy_settings(enabled, scheme=None, host=None, port=None):
+        """Validate one unauthenticated proxy independently of persistence."""
+        if enabled is not True and enabled is not False:
+            raise proxy.ProxyValidationError("Proxy state must be Enabled or Off.")
+        if not enabled:
+            return {"enabled": False, "scheme": None, "host": None, "port": None}
+        normalized = proxy.normalize_proxy_config(scheme, host, port)
+        if proxy.normalize_proxy_scheme(scheme) is None:
+            raise proxy.ProxyValidationError(
+                "Unsupported proxy scheme. Choose HTTP, HTTPS, SOCKS4, or SOCKS5."
+            )
+        if proxy.normalize_proxy_host(host) is None:
+            raise proxy.ProxyValidationError(
+                "Proxy host must be a hostname or IP address without a scheme, port, path, or credentials."
+            )
+        if proxy.normalize_proxy_port(port) is None:
+            raise proxy.ProxyValidationError("Proxy port must be a number from 1 to 65535.")
+        if normalized is None:
+            raise proxy.ProxyValidationError("Proxy configuration is incomplete or invalid.")
+        return {"enabled": True, **normalized}
+
+    @staticmethod
+    def _apply_proxy_settings(record, normalized):
+        """Write an already-validated proxy state into one catalog record."""
+        if not normalized["enabled"]:
+            record["proxy_enabled"] = False
+            for field in ("proxy_scheme", "proxy_host", "proxy_port"):
+                record.pop(field, None)
+            return
+        record["proxy_enabled"] = True
+        record.update({
+            "proxy_scheme": normalized["scheme"],
+            "proxy_host": normalized["host"],
+            "proxy_port": normalized["port"],
+        })
+
+    @staticmethod
+    def _apply_environment_settings(
+        record, profile_id, preset, config=None, *, regenerate=False
+    ):
+        """Write an environment record while delegating policy to environment.py."""
+        normalized_preset = environment.normalize_environment_preset(preset)
+        materialized = environment.materialize_environment_config(
+            profile_id,
+            normalized_preset,
+            config,
+            existing_config=record.get("environment_config"),
+            regenerate=regenerate,
+        )
+        record["environment_preset"] = normalized_preset
+        record.pop("environment_config", None)
+        if materialized is not None:
+            record["environment_config"] = materialized
+        return normalized_preset, materialized
+
     def set_environment(self, profile_id, preset, config=None):
         profile_id = validate_profile_id(profile_id)
-        normalized_preset = environment.normalize_environment_preset(preset)
-        normalized_config = environment.normalize_environment_config(config)
         with self.operation():
             self._check_registry_idle()
             self.require_profile_dir(profile_id)
@@ -280,16 +334,7 @@ class ProfileService:
             record = self._record_map(catalog).get(profile_id)
             if record is None:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
-            record["environment_preset"] = normalized_preset
-            record.pop("environment_config", None)
-            if normalized_preset == environment.ENVIRONMENT_CUSTOM:
-                record["environment_config"] = normalized_config or {}
-            elif normalized_preset == environment.ENVIRONMENT_MOBILE and normalized_config:
-                mobile_config = {key: normalized_config[key] for key in (
-                    "viewport_width", "viewport_height", "device_scale_factor", "language", "timezone"
-                ) if key in normalized_config}
-                if mobile_config:
-                    record["environment_config"] = mobile_config
+            self._apply_environment_settings(record, profile_id, preset, config)
             self._save_catalog(catalog)
         return self.get_environment(profile_id)
 
@@ -300,19 +345,7 @@ class ProfileService:
 
     def set_proxy(self, profile_id, enabled, scheme=None, host=None, port=None):
         profile_id = validate_profile_id(profile_id)
-        if enabled is not True and enabled is not False:
-            raise proxy.ProxyValidationError("Proxy state must be Enabled or Off.")
-        normalized = None
-        if enabled:
-            normalized = proxy.normalize_proxy_config(scheme, host, port)
-            if proxy.normalize_proxy_scheme(scheme) is None:
-                raise proxy.ProxyValidationError("Unsupported proxy scheme. Choose HTTP, HTTPS, SOCKS4, or SOCKS5.")
-            if proxy.normalize_proxy_host(host) is None:
-                raise proxy.ProxyValidationError("Proxy host must be a hostname or IP address without a scheme, port, path, or credentials.")
-            if proxy.normalize_proxy_port(port) is None:
-                raise proxy.ProxyValidationError("Proxy port must be a number from 1 to 65535.")
-            if normalized is None:
-                raise proxy.ProxyValidationError("Proxy configuration is incomplete or invalid.")
+        normalized = self._normalized_proxy_settings(enabled, scheme, host, port)
         with self.operation():
             self._check_registry_idle()
             self.require_profile_dir(profile_id)
@@ -320,15 +353,139 @@ class ProfileService:
             record = self._record_map(catalog).get(profile_id)
             if record is None:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
-            if not enabled:
-                record["proxy_enabled"] = False
-                for field in ("proxy_scheme", "proxy_host", "proxy_port"):
-                    record.pop(field, None)
-            else:
-                record["proxy_enabled"] = True
-                record.update({"proxy_scheme": normalized["scheme"], "proxy_host": normalized["host"], "proxy_port": normalized["port"]})
+            self._apply_proxy_settings(record, normalized)
             self._save_catalog(catalog)
         return self.get_proxy(profile_id)
+
+    def get_runtime_settings(self, profile_id):
+        """Return one UI-friendly runtime view while keeping services separate."""
+        record = self.get_profile_record(profile_id)
+        state = environment.runtime_environment_editor_state(record)
+        _, effective = environment.effective_environment(record)
+        # Normal records expose persisted/effective values. Legacy Mobile is
+        # intentionally presented as its R11 Android migration target, while
+        # retaining its old launch behaviour until the user saves it.
+        source = state if state.get("legacy_mobile_record") else effective
+        environment_state = {
+            "preset": state["preset"],
+            "environment_preset": state["preset"],
+            "user_agent": source.get("user_agent", ""),
+            "language": source.get("language", ""),
+            "device_scale_factor": source.get("device_scale_factor"),
+            "touch_mode": bool(source.get("touch_mode", False)),
+            "mobile_mode": bool(source.get("mobile_mode", False)),
+            "timezone": source.get("timezone", ""),
+            "window_size_policy": state.get(
+                "window_size_policy", environment.WINDOW_SIZE_POLICY_SYSTEM
+            ),
+            "window_width": effective.get("viewport_width"),
+            "window_height": effective.get("viewport_height"),
+            # Retain R10 names for API consumers that used the old editor.
+            "viewport_width": effective.get("viewport_width"),
+            "viewport_height": effective.get("viewport_height"),
+            "timezone_runtime_applied": False,
+        }
+        network = dict(proxy.effective_proxy(record))
+        return {
+            "environment": environment_state,
+            "network": network,
+            "proxy": dict(network),
+        }
+
+    @staticmethod
+    def _runtime_payload(environment_preset, environment_config, proxy_config):
+        """Accept both explicit arguments and one ergonomic settings mapping."""
+        if not isinstance(environment_preset, dict):
+            return environment_preset, environment_config, proxy_config
+        payload = environment_preset
+        environment_payload = payload.get("environment", payload)
+        if not isinstance(environment_payload, dict):
+            raise ProfileManagerError("Runtime environment settings must be an object.")
+        if proxy_config is None:
+            proxy_config = payload.get("network", payload.get("proxy"))
+        return (
+            environment_payload.get(
+                "preset", environment_payload.get("environment_preset", environment.ENVIRONMENT_DESKTOP)
+            ),
+            environment_payload,
+            proxy_config,
+        )
+
+    def save_runtime_settings(
+        self, profile_id, environment_preset, environment_config=None, proxy_config=None
+    ):
+        """Atomically save the coherent UI payload using separate policies.
+
+        The environment and proxy modules validate their own settings first;
+        catalog persistence happens once only after both are valid.
+        """
+        profile_id = validate_profile_id(profile_id)
+        environment_preset, environment_config, proxy_config = self._runtime_payload(
+            environment_preset, environment_config, proxy_config
+        )
+        if proxy_config is not None and not isinstance(proxy_config, dict):
+            raise proxy.ProxyValidationError("Proxy settings must be an object.")
+        if isinstance(proxy_config, dict) and any(
+            key in proxy_config for key in ("username", "password", "credentials")
+        ):
+            raise proxy.ProxyValidationError(
+                "Authenticated proxy launch and storage are not supported."
+            )
+        with self.operation():
+            self._check_registry_idle()
+            self.require_profile_dir(profile_id)
+            catalog = self._load_catalog()
+            record = self._record_map(catalog).get(profile_id)
+            if record is None:
+                raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+
+            # Validate both sides before changing the in-memory record.
+            normalized_preset = environment.normalize_environment_preset(environment_preset)
+            materialized = environment.materialize_environment_config(
+                profile_id,
+                normalized_preset,
+                environment_config,
+                existing_config=record.get("environment_config"),
+            )
+            if proxy_config is None:
+                normalized_proxy = dict(proxy.effective_proxy(record))
+            else:
+                normalized_proxy = self._normalized_proxy_settings(
+                    proxy_config.get("enabled"),
+                    proxy_config.get("scheme"),
+                    proxy_config.get("host"),
+                    proxy_config.get("port"),
+                )
+
+            record["environment_preset"] = normalized_preset
+            record.pop("environment_config", None)
+            if materialized is not None:
+                record["environment_config"] = materialized
+            self._apply_proxy_settings(record, normalized_proxy)
+            self._save_catalog(catalog)
+        return self.get_runtime_settings(profile_id)
+
+    def regenerate_environment(self, profile_id):
+        """Explicitly replace a persisted Generated identity and nothing else."""
+        profile_id = validate_profile_id(profile_id)
+        with self.operation():
+            self._check_registry_idle()
+            self.require_profile_dir(profile_id)
+            catalog = self._load_catalog()
+            record = self._record_map(catalog).get(profile_id)
+            if record is None:
+                raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+            if environment.normalize_environment_preset(record.get("environment_preset")) != environment.ENVIRONMENT_GENERATED:
+                raise ProfileManagerError("Choose Generated / Random before regenerating the environment.")
+            self._apply_environment_settings(
+                record,
+                profile_id,
+                environment.ENVIRONMENT_GENERATED,
+                record.get("environment_config"),
+                regenerate=True,
+            )
+            self._save_catalog(catalog)
+        return self.get_runtime_settings(profile_id)
 
     def _legacy_info_for_record(self, record, existing=None):
         info = dict(existing or {})
@@ -352,7 +509,7 @@ class ProfileService:
         self._legacy_mirror_enabled = coordinator.enabled
 
     def _check_registry_idle(self):
-        for root, label in ((self.paths.data_dir, "legacy"), (self.paths.profiles_dir, "managed")):
+        for root, label in ((self.paths.data_dir, "data"), (self.paths.profiles_dir, "managed")):
             if self.process_inspector.using_directory(root, exact=True):
                 raise ProfileManagerError(f"Chromium is using the shared {label} data directory. Close it before using the manager.")
 

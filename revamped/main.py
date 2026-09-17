@@ -13,7 +13,7 @@ from pathlib import Path
 from .accounts import AccountCompatibilityService
 from .core import ProfileManagerError, ProjectPaths
 from .extensions import ExtensionService
-from .gui import ProfileGUIController
+from .gui import ProfileGUIController, TkRevampedApp
 from .launcher import ChromiumLauncher
 from .processes import ChromiumProcessInspector
 from .profiles import ProfileService
@@ -58,7 +58,7 @@ def _safe_workspace_root(value):
 def compose(workspace_root, *, process_inspector=None, process_factory=None, logger=None):
     """Build the complete dependency graph below an approved disposable root."""
     root = _safe_workspace_root(workspace_root)
-    paths = ProjectPaths(root)
+    paths = ProjectPaths(root, assets_root=PROJECT_ROOT)
     log = logger or logging.getLogger("revamped")
     inspector = process_inspector or ChromiumProcessInspector()
     catalog_store = ProfileCatalogStore(paths, log)
@@ -81,6 +81,7 @@ def compose(workspace_root, *, process_inspector=None, process_factory=None, log
     launcher = ChromiumLauncher(
         paths,
         profile_service,
+        extension_service=extension_service,
         process_inspector=inspector,
         process_factory=process_factory,
         logger=log,
@@ -107,11 +108,28 @@ def compose(workspace_root, *, process_inspector=None, process_factory=None, log
     )
 
 
+def _create_tk_root():
+    """Create the real Tk root at the GUI boundary for easy headless mocking."""
+    import tkinter as tk
+
+    return tk.Tk()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Disposable-workspace revamped development composition")
     parser.add_argument(
         "--workspace-root",
         help="required disposable state root below repository tmp/",
+    )
+    parser.add_argument(
+        "--allow-browser-launch",
+        action="store_true",
+        help="explicitly allow the launcher to target the disposable workspace runtime",
+    )
+    parser.add_argument(
+        "--no-gui",
+        action="store_true",
+        help="initialize the disposable composition and exit without creating Tk",
     )
     args = parser.parse_args(argv)
     if args.workspace_root is None:
@@ -120,12 +138,37 @@ def main(argv=None):
             "Provide --workspace-root below tmp/."
         )
     try:
-        composition = compose(args.workspace_root)
+        if args.allow_browser_launch:
+            inspector = ChromiumProcessInspector()
+        else:
+            inspector = ChromiumProcessInspector(process_iter=lambda *_: [])
+        composition = compose(args.workspace_root, process_inspector=inspector)
         composition.profile_service.initialize_metadata()
     except ProfileManagerError as error:
         raise SystemExit(str(error)) from error
-    print(f"revamped development composition ready: {composition.paths.root}")
-    print("No browser process was launched.")
+
+    if args.no_gui:
+        print(f"revamped development composition ready: {composition.paths.root}")
+        print("No browser process was launched.")
+        return 0
+
+    try:
+        root = _create_tk_root()
+        app = TkRevampedApp(
+            root,
+            composition.controller,
+            allow_browser_launch=args.allow_browser_launch,
+        )
+        app.start()
+        root.mainloop()
+    except SystemExit:
+        raise
+    except Exception as error:
+        try:
+            root.destroy()
+        except (AttributeError, UnboundLocalError):
+            pass
+        raise SystemExit(f"Could not start revamped development GUI: {error}") from error
     return 0
 
 

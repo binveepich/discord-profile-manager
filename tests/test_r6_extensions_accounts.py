@@ -47,16 +47,80 @@ class R6Tests(unittest.TestCase):
         (source / "manifest.json").write_text(json.dumps({"manifest_version": 3}), encoding="utf-8")
         (source / "config.js").write_text('const ACCOUNT = {email: "", password: "", totpSecret: ""};', encoding="utf-8")
         (source / "shared.js").write_text("v1", encoding="utf-8")
+        self.add_extension(
+            paths,
+            "discord-token-extractor-extension",
+            {"manifest_version": 3, "background": {"service_worker": "background.js"}},
+            {"background.js": "const SOURCE = true;"},
+        )
         service = FakeProfileService(profile)
         extensions = ExtensionService(paths, service)
         accounts = AccountCompatibilityService(paths, service, extensions)
         return paths, profile, service, extensions, accounts
+
+    def add_extension(self, paths, name, manifest, files=None):
+        source = paths.extensions_dir / name
+        source.mkdir(parents=True, exist_ok=True)
+        (source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        for relative_name, contents in (files or {}).items():
+            target = source / relative_name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(contents, encoding="utf-8")
+        return source
 
     def test_extension_source_validation_and_staged_deployment(self):
         _, profile, _, extensions, _ = self.make_bundle()
         target = extensions.ensure_profile_extension("profile_0001")
         self.assertTrue((target / "manifest.json").is_file())
         self.assertEqual((target / "shared.js").read_text(encoding="utf-8"), "v1")
+
+    def test_registry_discovers_multiple_extensions_and_future_extension(self):
+        paths, _, _, extensions, _ = self.make_bundle()
+        self.add_extension(
+            paths,
+            "discord-token-extractor-extension",
+            {"manifest_version": 3, "background": {"service_worker": "background.js"}},
+            {"background.js": "self.addEventListener('install', () => {});"},
+        )
+        self.add_extension(paths, "future-extension", {"manifest_version": 3})
+        (paths.extensions_dir / "ignored-directory").mkdir()
+
+        discovered = extensions.discover_sources()
+
+        self.assertEqual(
+            list(discovered),
+            ["discord-autofill-extension", "discord-token-extractor-extension", "future-extension"],
+        )
+
+    def test_required_deployment_keeps_profiles_and_source_registry_isolated(self):
+        paths, first_profile, service, extensions, _ = self.make_bundle()
+        self.add_extension(
+            paths,
+            "discord-token-extractor-extension",
+            {"manifest_version": 3, "background": {"service_worker": "background.js"}},
+            {"background.js": "const SOURCE = true;"},
+        )
+        second_profile = paths.profiles_dir / "profile_0002"
+        (second_profile / "Default").mkdir(parents=True)
+        (second_profile / "Default" / "Preferences").write_text("{}", encoding="utf-8")
+        first_paths = extensions.ensure_required_extensions("profile_0001")
+
+        second_service = FakeProfileService(second_profile)
+        second_service.record = {"profile_id": "profile_0002", "proxy_enabled": False}
+        second_extensions = ExtensionService(paths, second_service)
+        second_paths = second_extensions.ensure_required_extensions("profile_0002")
+
+        self.assertEqual(
+            [path.name for path in first_paths],
+            ["discord-autofill-extension", "discord-token-extractor-extension"],
+        )
+        self.assertEqual(
+            [path.name for path in second_paths],
+            ["discord-autofill-extension", "discord-token-extractor-extension"],
+        )
+        (first_paths[1] / "profile-local.fixture").write_text("first", encoding="utf-8")
+        self.assertFalse((second_paths[1] / "profile-local.fixture").exists())
+        self.assertFalse((paths.extensions_dir / "discord-token-extractor-extension" / "profile-local.fixture").exists())
 
     def test_refresh_preserves_profile_config_and_unknown_extra_files(self):
         paths, profile, _, extensions, accounts = self.make_bundle()

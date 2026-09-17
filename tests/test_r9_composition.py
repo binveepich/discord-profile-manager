@@ -18,6 +18,9 @@ from revamped.storage import LegacyStateStore, ProfileCatalogStore
 from revamped.core import ProfileManagerError
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
 class R9CompositionTests(unittest.TestCase):
     def test_composition_requires_a_root_below_tmp(self):
         with self.assertRaises(ProfileManagerError):
@@ -44,7 +47,18 @@ class R9CompositionTests(unittest.TestCase):
             self.assertIsInstance(composition.controller, ProfileGUIController)
             self.assertIs(composition.process_inspector, inspector)
             self.assertFalse(composition.paths.profiles_json.exists())
-            self.assertFalse(composition.paths.browser_exe.exists())
+            self.assertEqual(
+                composition.paths.browser_exe,
+                PROJECT_ROOT / "browser" / "chrome.exe",
+            )
+            self.assertEqual(
+                composition.paths.extensions_dir,
+                PROJECT_ROOT / "extensions",
+            )
+            self.assertEqual(composition.paths.profiles_dir, workspace.root / "profiles")
+            self.assertEqual(composition.paths.data_dir, workspace.root / "data")
+            self.assertFalse((workspace.root / "browser").exists())
+            self.assertFalse((workspace.root / "extensions").exists())
             self.assertFalse(factory.called)
 
     def test_explicit_disposable_startup_initializes_only_disposable_state(self):
@@ -53,6 +67,7 @@ class R9CompositionTests(unittest.TestCase):
                 [
                     sys.executable, "-B", "-m", "revamped.main",
                     "--workspace-root", str(workspace.root),
+                    "--no-gui",
                 ],
                 cwd=Path(__file__).resolve().parents[1],
                 capture_output=True,
@@ -64,7 +79,7 @@ class R9CompositionTests(unittest.TestCase):
             self.assertIn("composition ready", result.stdout)
             self.assertIn("No browser process was launched", result.stdout)
             self.assertTrue((workspace.root / "config" / "profiles.json").is_file())
-            self.assertTrue((workspace.root / "legacy" / "data" / "Local State").is_file())
+            self.assertTrue((workspace.root / "data" / "Local State").is_file())
             self.assertFalse((workspace.root / "browser" / "chrome.exe").exists())
 
     def test_no_root_refuses_without_opening_live_state(self):

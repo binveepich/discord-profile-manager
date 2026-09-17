@@ -32,7 +32,7 @@ class AccountCompatibilityService:
         return self.extension_service.ensure_profile_extension(profile_id)
 
     def _ensure_both_extensions_installed(self, profile_id):
-        return [self._ensure_extension_installed(profile_id)]
+        return self.extension_service.ensure_required_extensions(profile_id)
 
     def _get_config_path(self, profile_id):
         profile_dir = self.profile_service.require_profile_dir(profile_id)
@@ -88,7 +88,7 @@ class AccountCompatibilityService:
             raise InvalidAccountFormatError("Email and password cannot be empty")
         if totp_secret:
             totp_secret = totp_secret.upper()
-        self._ensure_extension_installed(profile_id)
+        self._ensure_both_extensions_installed(profile_id)
         self._enable_developer_mode(profile_id)
         config_content = f"""// Discord Auto-fill Extension Configuration
 const ACCOUNT = {{

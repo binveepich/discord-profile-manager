@@ -369,6 +369,131 @@ class ProfileCatalogStore:
                     self.logger.warning("Could not remove a temporary profiles.json file")
 
 
+class ExtensionPolicyStore:
+    """Persist the global extension enablement policy outside the registry.
+
+    The repository ``extensions/`` tree is a read-only source registry from
+    the manager's point of view.  Only extension names are stored here; source
+    paths and manifests are rediscovered at runtime.
+    """
+
+    version = 1
+
+    def __init__(self, paths, logger=None):
+        self.paths = paths
+        self.path = paths.extension_policy_json
+        self._loaded_bytes = None
+        self.logger = _logger_or_null(logger)
+
+    @staticmethod
+    def _unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate extension policy key")
+            result[key] = value
+        return result
+
+    @staticmethod
+    def _valid_extension_name(value):
+        if not isinstance(value, str) or not value or value != value.strip():
+            return False
+        windows_path = PureWindowsPath(value.replace("/", "\\"))
+        return not (
+            windows_path.is_absolute()
+            or windows_path.drive
+            or len(windows_path.parts) != 1
+            or windows_path.parts[0] in ("", ".", "..")
+            or any(char in '<>:"/\\|?*' or ord(char) < 32 for char in value)
+        )
+
+    @classmethod
+    def _validate(cls, data):
+        if not isinstance(data, dict) or data.get("version") != cls.version:
+            raise ValueError("Unsupported extension policy version")
+        enabled = data.get("enabled_extensions")
+        if not isinstance(enabled, list):
+            raise ValueError("Expected an enabled_extensions list")
+        seen = set()
+        for name in enabled:
+            if not cls._valid_extension_name(name):
+                raise ValueError("Invalid extension name in global policy")
+            folded = name.casefold()
+            if folded in seen:
+                raise ValueError("Duplicate extension in global policy")
+            seen.add(folded)
+        return data
+
+    @staticmethod
+    def empty_policy():
+        return {"version": ExtensionPolicyStore.version, "enabled_extensions": []}
+
+    def load(self):
+        """Load policy, falling back safely when it is missing or malformed."""
+        try:
+            if not self.path.exists():
+                self._loaded_bytes = None
+                return self.empty_policy()
+            raw = self.path.read_bytes()
+            if not raw.strip():
+                self._loaded_bytes = raw
+                return self.empty_policy()
+            data = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=self._unique_keys)
+            self._validate(data)
+            self._loaded_bytes = raw
+            return data
+        except (OSError, ValueError, UnicodeError) as error:
+            # A broken optional policy must not prevent the manager from
+            # opening profiles.  Required built-ins are enforced by the
+            # extension service, and a later user save can repair this file.
+            self._loaded_bytes = raw if "raw" in locals() else None
+            self.logger.warning(
+                "Global extension policy is unreadable; using required built-ins only"
+            )
+            return self.empty_policy()
+
+    def save(self, data):
+        """Validate and atomically publish the application-owned policy."""
+        temp_path = None
+        try:
+            self._validate(data)
+            parent = self.path.parent
+            checked_path(parent, self.paths.root)
+            parent.mkdir(parents=True, exist_ok=True)
+            current = self.path.read_bytes() if self.path.exists() else None
+            if current != self._loaded_bytes:
+                raise ProfileManagerError(
+                    "Global extension policy changed during this operation. Refresh and retry."
+                )
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=parent,
+                prefix=".extensions-", suffix=".tmp", delete=False
+            ) as stream:
+                temp_path = Path(stream.name)
+                json.dump(data, stream, indent=2, ensure_ascii=False)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            candidate_bytes = temp_path.read_bytes()
+            candidate = json.loads(
+                candidate_bytes.decode("utf-8"), object_pairs_hook=self._unique_keys
+            )
+            self._validate(candidate)
+            temp_path.replace(self.path)
+            self._loaded_bytes = candidate_bytes
+        except ProfileManagerError:
+            raise
+        except (OSError, ValueError, UnicodeError) as error:
+            self.logger.error("Failed to save global extension policy")
+            raise ProfileManagerError("Cannot save global extension policy.") from error
+        finally:
+            if temp_path is not None and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    self.logger.warning("Could not remove a temporary extension policy file")
+
+
 class MirrorCoordinator:
     """Publish the optional legacy mirror with compensating restore."""
 
@@ -462,4 +587,3 @@ class MirrorCoordinator:
 
 def empty_catalog():
     return {"version": METADATA_VERSION, "profiles": []}
-

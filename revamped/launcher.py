@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 from .core import ProfileManagerError, checked_path
-from .environment import environment_launch_arguments
+from .environment import environment_launch_arguments, environment_runtime_notes
 from .processes import ChromiumProcessInspector
 from .proxy import proxy_launch_arguments
 
@@ -37,12 +37,14 @@ class ChromiumLauncher:
         paths,
         profile_service,
         *,
+        extension_service=None,
         process_inspector=None,
         process_factory=None,
         logger=None,
     ):
         self.paths = paths
         self.profile_service = profile_service
+        self.extension_service = extension_service
         self.launcher_path = Path(paths.browser_exe)
         self.process_inspector = process_inspector or ChromiumProcessInspector()
         self.process_factory = process_factory or subprocess.Popen
@@ -68,6 +70,16 @@ class ChromiumLauncher:
             DISCORD_URL,
         ]
         if extension_paths:
+            if self.extension_service is not None:
+                # A caller may hold deployments from an older policy.  Keep
+                # command assembly safe even when it is used directly rather
+                # than through launch_discord().
+                extension_paths = [
+                    path for path in extension_paths
+                    if path and self.extension_service.is_extension_enabled(
+                        Path(path).name
+                    )
+                ]
             valid_paths = [
                 str(checked_path(path, profile_data_dir))
                 for path in extension_paths
@@ -101,9 +113,17 @@ class ChromiumLauncher:
             if (previous is not None and previous.poll() is None) or self.process_inspector.using_directory(profile_data_dir):
                 return False
             self.profile_service.get_browser_profile_dir(profile_id)
+            if self.extension_service is not None:
+                # Deployment belongs to launch preparation, independently of
+                # account setup, and must never refresh a live profile.  The
+                # current global policy is authoritative even when the caller
+                # has stale paths from an earlier launch.
+                extension_paths = self.extension_service.ensure_enabled_extensions(profile_id)
             command = self.build_command(
                 profile_id, profile_data_dir, profile_record, extension_paths
             )
+            for note in environment_runtime_notes(profile_record):
+                self.logger.warning("Profile %s environment: %s", profile_id, note)
             self.logger.info("Requesting Chromium launch for profile %s", profile_id)
             try:
                 process = self.process_factory(
@@ -124,4 +144,3 @@ class ChromiumLauncher:
                 raise
             except OSError as error:
                 raise ProfileManagerError(f"Cannot launch Chromium: {error}") from error
-

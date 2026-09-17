@@ -1,5 +1,6 @@
 """M5 extension architecture regressions using synthetic account data only."""
 
+import json
 import shutil
 import unittest
 from unittest.mock import patch
@@ -30,6 +31,19 @@ class ExtensionTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def make_manifest_extension(self, name, manifest=None, files=None):
+        source = self.extensions / name
+        source.mkdir(parents=True)
+        (source / "manifest.json").write_text(
+            json.dumps(manifest or {"manifest_version": 3}),
+            encoding="utf-8",
+        )
+        for relative_name, contents in (files or {}).items():
+            target = source / relative_name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(contents, encoding="utf-8")
+        return source
+
     def test_extension_source_discovery_returns_only_supported_source(self):
         self.make_source()
         profiles = self.make_profiles()
@@ -39,6 +53,85 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(discovered, {
             self.manager.AUTOFILL_EXTENSION_NAME: self.manager.EXT_DIR,
         })
+
+    def test_registry_discovers_required_and_future_extensions_deterministically(self):
+        self.make_source()
+        self.make_manifest_extension(
+            self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
+            {"manifest_version": 3, "background": {"service_worker": "background.js"}},
+            {"background.js": "self.addEventListener('install', () => {});"},
+        )
+        self.make_manifest_extension("future-extension", {"manifest_version": 3})
+        (self.extensions / "not-an-extension").mkdir(parents=True)
+        profiles = self.make_profiles()
+
+        discovered = self.manager.ExtensionManager(profiles).discover_sources()
+
+        self.assertEqual(
+            list(discovered),
+            ["discord-autofill-extension", "discord-token-extractor-extension", "future-extension"],
+        )
+        self.assertEqual(
+            set(discovered),
+            {
+                self.manager.AUTOFILL_EXTENSION_NAME,
+                self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
+                "future-extension",
+            },
+        )
+
+    def test_required_deployment_is_multi_extension_and_profile_local(self):
+        self.make_source()
+        token = self.make_manifest_extension(
+            self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
+            {"manifest_version": 3, "background": {"service_worker": "background.js"}},
+            {"background.js": "const SOURCE = true;"},
+        )
+        source_snapshot = {
+            path.relative_to(self.extensions): path.read_bytes()
+            for path in self.extensions.rglob("*") if path.is_file()
+        }
+        profiles = self.make_profiles()
+        first = profiles.create_profile("First")
+        second = profiles.create_profile("Second")
+        extensions = self.manager.ExtensionManager(profiles)
+
+        first_paths = extensions.ensure_required_extensions(first)
+        second_paths = extensions.ensure_required_extensions(second)
+
+        self.assertEqual(
+            [path.name for path in first_paths],
+            [self.manager.AUTOFILL_EXTENSION_NAME, self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME],
+        )
+        self.assertEqual(
+            [path.name for path in extensions.get_profile_extension_paths(first)],
+            [self.manager.AUTOFILL_EXTENSION_NAME, self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME],
+        )
+        first_token = next(path for path in first_paths if path.name == token.name)
+        second_token = next(path for path in second_paths if path.name == token.name)
+        (first_token / "profile-local.fixture").write_text("first", encoding="utf-8")
+        self.assertFalse((second_token / "profile-local.fixture").exists())
+        self.make_runtime()
+        self.assertTrue(self.manager.ChromiumLauncher().launch_discord(first, first_paths))
+        command = self.popen.call_args.args[0]
+        expected_load = "--load-extension=" + ",".join(str(path) for path in first_paths)
+        self.assertIn(expected_load, command)
+        self.assertEqual(
+            source_snapshot,
+            {
+                path.relative_to(self.extensions): path.read_bytes()
+                for path in self.extensions.rglob("*") if path.is_file()
+            },
+        )
+
+    def test_invalid_registry_extension_is_ignored_without_affecting_valid_extensions(self):
+        self.make_source()
+        self.make_manifest_extension("future-invalid", {"manifest_version": 3, "background": {"service_worker": "missing.js"}})
+        profiles = self.make_profiles()
+
+        discovered = self.manager.ExtensionManager(profiles).discover_sources()
+
+        self.assertEqual(set(discovered), {self.manager.AUTOFILL_EXTENSION_NAME})
 
     def test_one_profile_deploys_and_loads_extension(self):
         self.make_runtime()
@@ -138,8 +231,13 @@ class ExtensionTests(unittest.TestCase):
 
         (source / "manifest.json").write_text('{"manifest_version": 3}', encoding="utf-8")
         (source / "config.js").unlink()
+        self.assertIn(
+            self.manager.AUTOFILL_EXTENSION_NAME,
+            self.manager.ExtensionManager(profiles).discover_sources(),
+        )
+        profile_id = profiles.create_profile("Incomplete source")
         with self.assertRaises(self.manager.ExtensionError):
-            self.manager.ExtensionManager(profiles).discover_sources()
+            self.manager.ExtensionManager(profiles).ensure_profile_extension(profile_id)
 
     def test_missing_profile_deployment_can_be_recreated(self):
         self.make_source()
@@ -255,7 +353,7 @@ class ExtensionTests(unittest.TestCase):
             2,
         )
 
-    def test_only_autofill_extension_is_discovered_and_logs_do_not_contain_accounts(self):
+    def test_discovery_and_logs_do_not_contain_accounts(self):
         self.make_source()
         profiles = self.make_profiles()
         profile_id = profiles.create_profile("Log hygiene")

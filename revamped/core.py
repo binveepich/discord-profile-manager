@@ -41,24 +41,30 @@ class ProxyValidationError(ProfileManagerError):
 
 @dataclass(frozen=True)
 class ProjectPaths:
-    """Explicit application paths rooted at one disposable or approved root.
+    """Separate writable state paths from repository-owned read-only assets.
 
     Constructing this value performs no filesystem access. Services decide when
     to create or inspect their own directories.
     """
 
     root: Path
+    assets_root: Path | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "root", Path(self.root).absolute())
+        object.__setattr__(
+            self,
+            "assets_root",
+            Path(self.assets_root if self.assets_root is not None else self.root).absolute(),
+        )
 
     @property
     def project_root(self):
-        return self.root
+        return self.assets_root
 
     @property
     def browser_exe(self):
-        return self.root / "browser" / "chrome.exe"
+        return self.assets_root / "browser" / "chrome.exe"
 
     @property
     def config_dir(self):
@@ -69,8 +75,19 @@ class ProjectPaths:
         return self.config_dir / "profiles.json"
 
     @property
+    def extension_policy_json(self):
+        """Application-owned global extension enablement policy."""
+        return self.config_dir / "extensions.json"
+
+    # Keep the shorter name available to callers that treat the file as the
+    # global extension registry policy rather than as profile metadata.
+    @property
+    def extensions_json(self):
+        return self.extension_policy_json
+
+    @property
     def data_dir(self):
-        return self.root / "legacy" / "data"
+        return self.root / "data"
 
     @property
     def local_state(self):
@@ -86,15 +103,19 @@ class ProjectPaths:
 
     @property
     def legacy_log_dir(self):
-        return self.root / "legacy" / "log"
+        return self.root / "logs"
 
     @property
     def extensions_dir(self):
-        return self.root / "extensions"
+        return self.assets_root / "extensions"
 
     @property
     def autofill_extension_dir(self):
         return self.extensions_dir / "discord-autofill-extension"
+
+    @property
+    def token_extractor_extension_dir(self):
+        return self.extensions_dir / "discord-token-extractor-extension"
 
 
 def validate_profile_id(profile_id):
@@ -194,11 +215,11 @@ def ensure_tree_has_no_links(root):
 
 
 def metadata_path_for_profile(path, paths):
-    """Serialize a profile below ``profiles/`` or ``legacy/data/`` safely."""
+    """Serialize a profile below ``profiles/`` or ``data/`` safely."""
     path = Path(path).absolute()
     roots = (
         (Path(paths.profiles_dir).absolute(), ("profiles",)),
-        (Path(paths.data_dir).absolute(), ("legacy", "data")),
+        (Path(paths.data_dir).absolute(), ("data",)),
     )
     for root, prefix in roots:
         try:
@@ -227,10 +248,10 @@ def profile_path_from_metadata(value, paths):
     folded_parts = tuple(part.casefold() for part in parts)
     if folded_parts[:1] == ("profiles",) and len(parts) > 1:
         root, relative_parts = Path(paths.profiles_dir), parts[1:]
-    elif folded_parts[:2] == ("legacy", "data") and len(parts) > 2:
-        root, relative_parts = Path(paths.data_dir), parts[2:]
+    elif folded_parts[:1] == ("data",) and len(parts) > 1:
+        root, relative_parts = Path(paths.data_dir), parts[1:]
     else:
         raise ProfileManagerError(
-            "Profile directory must be under profiles/ or legacy/data/."
+            "Profile directory must be under profiles/ or data/."
         )
     return checked_path(root.joinpath(*relative_parts), root)
