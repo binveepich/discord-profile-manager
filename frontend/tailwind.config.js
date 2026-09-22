@@ -4,15 +4,15 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#090b10",
-        panel: "#11151d",
-        elevated: "#171c26",
-        line: "#28313e",
-        accent: "#7289da",
-        mint: "#57d9a3",
+        ink: "var(--color-ink)",
+        panel: "var(--color-panel)",
+        elevated: "var(--color-elevated)",
+        line: "var(--color-line)",
+        accent: "var(--color-accent)",
+        mint: "var(--color-success)",
       },
       boxShadow: {
-        panel: "0 18px 50px rgba(0, 0, 0, .24)",
+        panel: "var(--shadow-panel)",
       },
     },
   },

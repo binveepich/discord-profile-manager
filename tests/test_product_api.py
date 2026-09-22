@@ -79,6 +79,29 @@ class ProductAPITests(unittest.TestCase):
         self.assertEqual(exported["proxy_username"], "user")
         self.assertEqual(exported["proxy_password"], "fixture-pass")
 
+    def test_ui_preferences_are_application_owned_and_round_trip(self):
+        saved = self.api.save_ui_preferences({
+            "theme": "light",
+            "density": "compact",
+            "reduce_motion": True,
+            "sidebar_collapsed": True,
+            "visible_columns": ["status", "account", "status", "unknown"],
+            "password": "must-not-persist",
+        })
+        self.assertEqual(saved["theme"], "light")
+        self.assertEqual(saved["visible_columns"], ["status", "account"])
+        self.assertEqual(self.api.get_ui_preferences(), saved)
+        raw = self.application.paths.ui_preferences_json.read_text(encoding="utf-8")
+        self.assertNotIn("must-not-persist", raw)
+        self.assertNotIn("password", raw)
+
+    def test_about_info_uses_repository_metadata_without_email_addresses(self):
+        info = self.api.get_about_info()
+        self.assertEqual(info["name"], "Discord Profile Manager")
+        self.assertIn("Pre-final", info["status"])
+        self.assertTrue(info["commit"])
+        self.assertTrue(all("@" not in name for name in info["contributors"]))
+
     def test_batch_launch_is_ordered_and_reports_progress(self):
         first = self.api.create_profile("First")["profile_id"]
         second = self.api.create_profile("Second")["profile_id"]

@@ -8,64 +8,33 @@ import Toasts from "./components/Toasts";
 import ProfileEditorModal from "./dialogs/ProfileEditorModal";
 import BatchImportDialog from "./dialogs/BatchImportDialog";
 import ProxyCheckDialog from "./dialogs/ProxyCheckDialog";
+import SettingsPage from "./pages/SettingsPage";
+import AboutPage from "./pages/AboutPage";
 import { applyProfileDeltaToRows } from "./profileDelta";
+import { DEFAULT_PREFERENCES, normalizePreferences, readLocalPreferences, resolveTheme, writeLocalPreferences } from "./uiPreferences";
+import { UI, formatCount, userError } from "./i18n";
 
 const DEMO_ROWS = [{
-  profile_id: "profile_0001",
-  stt: "0001",
-  name: "Work",
-  account: "work@example.com",
-  has_account: true,
-  environment: { preset: "desktop", label: "Desktop" },
-  proxy: { enabled: false },
-  status: "Closed",
-  last_opened: null,
-  created_at: null,
+  profile_id: "profile_0001", stt: "0001", name: "Ví dụ", account: "demo@example.invalid",
+  has_account: true, environment: { preset: "desktop", label: "Desktop" }, proxy: { enabled: false },
+  status: "Closed", last_opened: null, created_at: null,
 }];
 
 function compareText(left, right) {
-  return String(left || "").localeCompare(String(right || ""), undefined, {
-    numeric: true,
-    sensitivity: "base",
-  });
+  return String(left || "").localeCompare(String(right || ""), undefined, { numeric: true, sensitivity: "base" });
 }
 
 function filterAndSortProfiles(rows, query, sort) {
   const needle = String(query || "").trim().toLocaleLowerCase();
-  const filtered = rows.filter((row) => {
-    if (!needle) return true;
-    const searchable = [
-      row.stt,
-      row.name,
-      row.profile_id,
-      row.account,
-      row.status,
-      row.proxy?.host,
-    ].map((value) => String(value || "").toLocaleLowerCase());
-    return searchable.some((value) => value.includes(needle));
-  });
-
+  const filtered = rows.filter((row) => !needle || [row.stt, row.name, row.profile_id, row.account, row.status, row.proxy?.host].map((value) => String(value || "").toLocaleLowerCase()).some((value) => value.includes(needle)));
   if (sort === "last_opened") {
-    const opened = filtered.filter((row) => row.last_opened);
-    const unopened = filtered.filter((row) => !row.last_opened);
-    opened.sort((left, right) => (
-      Date.parse(right.last_opened) - Date.parse(left.last_opened)
-      || compareText(left.stt, right.stt)
-    ));
-    unopened.sort((left, right) => compareText(left.stt, right.stt));
+    const opened = filtered.filter((row) => row.last_opened).sort((left, right) => Date.parse(right.last_opened) - Date.parse(left.last_opened) || compareText(left.stt, right.stt));
+    const unopened = filtered.filter((row) => !row.last_opened).sort((left, right) => compareText(left.stt, right.stt));
     return [...opened, ...unopened];
   }
-
-  const values = {
-    stt: (row) => row.stt,
-    name: (row) => row.name,
-    id: (row) => row.profile_id,
-    status: (row) => row.status,
-  };
+  const values = { stt: (row) => row.stt, name: (row) => row.name, id: (row) => row.profile_id, status: (row) => row.status };
   const value = values[sort] || values.stt;
-  return [...filtered].sort((left, right) => (
-    compareText(value(left), value(right)) || compareText(left.stt, right.stt)
-  ));
+  return [...filtered].sort((left, right) => compareText(value(left), value(right)) || compareText(left.stt, right.stt));
 }
 
 export default function App() {
@@ -80,10 +49,12 @@ export default function App() {
   const [delay, setDelay] = useState("2");
   const [batch, setBatch] = useState(null);
   const [deleteInFlight, setDeleteInFlight] = useState(false);
+  const [activeView, setActiveView] = useState("profiles");
+  const [preferences, setPreferences] = useState(readLocalPreferences);
   const lastErrorToast = useRef(null);
 
   const notify = useCallback((message, type = "success") => {
-    const normalized = String(message || "Operation failed.");
+    const normalized = String(message || (type === "error" ? "Không thể hoàn tất thao tác." : "Đã hoàn tất."));
     const key = `${type}:${normalized}`;
     if (type === "error" && lastErrorToast.current === key) return;
     lastErrorToast.current = type === "error" ? key : null;
@@ -92,63 +63,68 @@ export default function App() {
     window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 4500);
   }, []);
 
+  const updatePreferences = useCallback((changes) => {
+    setPreferences((current) => normalizePreferences({ ...current, ...changes }));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    call("get_ui_preferences").then((saved) => { if (active && saved && Object.keys(saved).length) setPreferences((current) => normalizePreferences({ ...current, ...saved })); }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    const resolved = resolveTheme(preferences.theme);
+    document.documentElement.dataset.theme = resolved;
+    document.documentElement.dataset.motion = preferences.reduce_motion ? "reduced" : "full";
+    document.documentElement.style.colorScheme = resolved;
+    writeLocalPreferences(preferences);
+    const timer = window.setTimeout(() => call("save_ui_preferences", preferences).catch(() => {}), 120);
+    return () => window.clearTimeout(timer);
+  }, [preferences]);
+
+  useEffect(() => {
+    if (preferences.theme !== "system" || !window.matchMedia) return undefined;
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const update = () => { document.documentElement.dataset.theme = media.matches ? "light" : "dark"; };
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, [preferences.theme]);
+
   const loadProfiles = useCallback(async () => {
     setRefreshing(true);
     try {
-      // Search and sorting are intentionally local. Full reads are reserved
-      // for startup, manual Refresh, and recovery from an untrusted delta.
       const rows = await call("list_profiles", "", "stt", false);
       setProfiles(rows);
-      setSelected((current) => new Set(
-        [...current].filter((id) => rows.some((row) => row.profile_id === id)),
-      ));
+      setSelected((current) => new Set([...current].filter((id) => rows.some((row) => row.profile_id === id))));
     } catch (error) {
       if (!hasNativeBridge()) setProfiles(DEMO_ROWS);
-      else notify(error.message, "error");
-    } finally {
-      setRefreshing(false);
-    }
+      else notify(userError(error), "error");
+    } finally { setRefreshing(false); }
   }, [notify]);
 
   const applyProfileDelta = useCallback((updates = [], removedIds = []) => {
-    if (!Array.isArray(updates) || !updates.every((row) => (
-      row && typeof row.profile_id === "string" && typeof row.name === "string"
-    ))) return false;
+    if (!Array.isArray(updates) || !updates.every((row) => row && typeof row.profile_id === "string" && typeof row.name === "string")) return false;
     const removals = new Set((Array.isArray(removedIds) ? removedIds : []).map(String));
-    setProfiles((current) => {
-      const next = applyProfileDeltaToRows(current, updates, removedIds);
-      return next;
-    });
-    if (removals.size) {
-      setSelected((current) => new Set([...current].filter((id) => !removals.has(id))));
-    }
+    setProfiles((current) => applyProfileDeltaToRows(current, updates, removedIds));
+    if (removals.size) setSelected((current) => new Set([...current].filter((id) => !removals.has(id))));
     return true;
   }, []);
 
   const handleProfileSaved = useCallback((row) => {
-    if (!applyProfileDelta([row])) {
-      notify("Profile saved, but the table could not apply the returned profile summary. Use Refresh to resynchronize.", "error");
-    }
+    if (!applyProfileDelta([row])) notify("Đã lưu hồ sơ nhưng bảng chưa thể cập nhật. Hãy bấm Làm mới để đồng bộ lại.", "error");
+    else notify("Đã lưu thay đổi hồ sơ.");
   }, [applyProfileDelta, notify]);
 
   const handleImportDone = useCallback((result) => {
     const rows = Array.isArray(result?.profiles) ? result.profiles : [];
     const created = Number(result?.created || 0);
-    if (created && rows.length !== created) {
-      notify("Import succeeded, but the table received an incomplete profile delta. Use Refresh to resynchronize.", "error");
-    }
-    if (rows.length && !applyProfileDelta(rows)) {
-      notify("Import succeeded, but the table could not apply the returned profile summaries. Use Refresh to resynchronize.", "error");
-    }
+    if (created && rows.length !== created) notify("Đã nhập nhưng bảng nhận được dữ liệu chưa đầy đủ. Hãy bấm Làm mới.", "error");
+    if (rows.length && !applyProfileDelta(rows)) notify("Đã nhập nhưng bảng chưa thể cập nhật. Hãy bấm Làm mới.", "error");
+    if (created && rows.length === created) notify(`Đã tạo ${created} hồ sơ từ dữ liệu nhập.`);
   }, [applyProfileDelta, notify]);
 
-  useEffect(() => {
-    let active = true;
-    waitForBridge().then(() => {
-      if (active) loadProfiles();
-    });
-    return () => { active = false; };
-  }, [loadProfiles]);
+  useEffect(() => { let active = true; waitForBridge().then(() => { if (active) loadProfiles(); }); return () => { active = false; }; }, [loadProfiles]);
 
   useEffect(() => {
     let active = true;
@@ -158,85 +134,39 @@ export default function App() {
         const updates = await call("refresh_status");
         if (!active || !Array.isArray(updates)) return;
         const statusById = new Map(updates.map((item) => [item.profile_id, item.status]));
-        setProfiles((current) => {
-          let changed = false;
-          const next = current.map((row) => {
-            const status = statusById.get(row.profile_id);
-            if (!status || status === row.status) return row;
-            changed = true;
-            return { ...row, status };
-          });
-          return changed ? next : current;
-        });
-      } catch {
-        // A transient process enumeration failure should not disrupt the table.
-      }
+        setProfiles((current) => { let changed = false; const next = current.map((row) => { const status = statusById.get(row.profile_id); if (!status || status === row.status) return row; changed = true; return { ...row, status }; }); return changed ? next : current; });
+      } catch { /* Status is best-effort and should never interrupt the table. */ }
     };
     const timer = window.setInterval(pollStatus, 2000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
+    return () => { active = false; window.clearInterval(timer); };
   }, []);
 
-  useEffect(() => {
-    call("get_runtime_info").then(setRuntime).catch(() => {});
-  }, []);
+  useEffect(() => { call("get_runtime_info").then(setRuntime).catch(() => {}); }, []);
 
-  const visibleProfiles = useMemo(
-    () => filterAndSortProfiles(profiles, query, sort),
-    [profiles, query, sort],
-  );
-  const selectedRows = useMemo(
-    () => profiles.filter((row) => selected.has(row.profile_id)),
-    [profiles, selected],
-  );
+  const visibleProfiles = useMemo(() => filterAndSortProfiles(profiles, query, sort), [profiles, query, sort]);
+  const selectedRows = useMemo(() => profiles.filter((row) => selected.has(row.profile_id)), [profiles, selected]);
   const selectedProfile = selectedRows.length === 1 ? selectedRows[0] : null;
-
-  const toggle = (id) => setSelected((current) => {
-    const next = new Set(current);
-    next.has(id) ? next.delete(id) : next.add(id);
-    return next;
-  });
-  const toggleAll = () => setSelected((current) => (
-    visibleProfiles.length > 0 && visibleProfiles.every((row) => current.has(row.profile_id))
-      ? new Set([...current].filter((id) => !visibleProfiles.some((row) => row.profile_id === id)))
-      : new Set([...current, ...visibleProfiles.map((row) => row.profile_id)])
-  ));
+  const toggle = (id) => setSelected((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  const toggleAll = () => setSelected((current) => visibleProfiles.length > 0 && visibleProfiles.every((row) => current.has(row.profile_id)) ? new Set([...current].filter((id) => !visibleProfiles.some((row) => row.profile_id === id))) : new Set([...current, ...visibleProfiles.map((row) => row.profile_id)]));
 
   const exportAccountData = async (kind) => {
     try {
-      // The desktop bridge owns the native save-location dialog and writes
-      // only the backend's safe account-metadata export. The product shell
-      // does not create client-side downloads.
-      if (!selected.size) {
-        notify("Select at least one profile before exporting account data.", "error");
-        return;
-      }
+      if (!selected.size) { notify("Hãy chọn ít nhất một hồ sơ trước khi xuất dữ liệu.", "error"); return; }
       const result = await call("save_account_export", kind, [...selected]);
-      if (result?.cancelled) {
-        notify("Account-data export cancelled.");
-        return;
-      }
-      if (!result?.saved) throw new Error("Account-data export was not saved.");
-      notify(`${kind.toUpperCase()} account-data export saved${result.filename ? `: ${result.filename}` : "."}`);
-    } catch (error) {
-      notify(error.message, "error");
-    }
+      if (result?.cancelled) { notify("Đã hủy xuất dữ liệu."); return; }
+      if (!result?.saved) throw new Error("export failed");
+      notify(`Đã lưu tệp ${kind.toUpperCase()}${result.filename ? `: ${result.filename}` : ""}.`);
+    } catch (error) { notify(userError(error), "error"); }
   };
 
   const launch = async () => {
-    try {
-      const jobId = await call("launch_batch", [...selected], Number(delay));
-      setBatch({
-        jobId,
-        status: "running",
-        progress: { completed: 0, total: selected.size },
-        onCancel: () => call("cancel_batch", jobId),
-      });
-    } catch (error) {
-      notify(error.message, "error");
-    }
+    try { const jobId = await call("launch_batch", [...selected], Number(delay)); setBatch({ jobId, status: "running", progress: { completed: 0, total: selected.size }, onCancel: () => call("cancel_batch", jobId) }); }
+    catch (error) { notify(userError(error), "error"); }
+  };
+
+  const launchOne = async (row) => {
+    try { const result = await call("launch_profile", row.profile_id); if (result?.profile) applyProfileDelta([result.profile]); notify(result?.already_running ? "Hồ sơ đang mở." : "Đã mở hồ sơ."); }
+    catch (error) { notify(userError(error), "error"); }
   };
 
   useEffect(() => {
@@ -247,110 +177,43 @@ export default function App() {
         setBatch((current) => ({ ...current, ...state, onCancel: current?.onCancel }));
         if (["completed", "failed", "cancelled"].includes(state.status)) {
           window.clearInterval(timer);
-          if (state.status === "completed") notify("Batch launch complete.");
-          if (state.status === "failed") notify(state.error || "Batch launch failed.", "error");
-          if (state.status !== "cancelled" && state.result?.profiles?.length) {
-            if (!applyProfileDelta(state.result.profiles)) {
-              notify("Launch completed, but the table could not apply the returned profile updates. Use Refresh to resynchronize.", "error");
-            }
-          }
+          if (state.status === "completed") notify("Đã mở xong các hồ sơ đã chọn.");
+          if (state.status === "failed") notify("Không thể mở một số hồ sơ. Vui lòng thử lại.", "error");
+          if (state.status !== "cancelled" && state.result?.profiles?.length) applyProfileDelta(state.result.profiles);
         }
-      } catch {
-        window.clearInterval(timer);
-      }
+      } catch { window.clearInterval(timer); }
     }, 300);
     return () => window.clearInterval(timer);
   }, [applyProfileDelta, batch?.jobId, notify]);
 
   const deleteSelected = async () => {
     if (deleteInFlight || !selected.size) return;
-    // Snapshot stable IDs before the confirmation dialog and before any table
-    // refresh can change selection state.
     const profileIds = [...selected];
-    if (!window.confirm(`Delete ${profileIds.length} selected profile(s)? Their isolated browser data will be removed.`)) return;
+    if (!window.confirm(`Bạn có chắc muốn xóa ${profileIds.length} hồ sơ đã chọn? Dữ liệu trình duyệt độc lập của các hồ sơ này cũng sẽ bị xóa.`)) return;
     setDeleteInFlight(true);
     try {
       const result = await call("delete_profiles", profileIds, true);
-      const failureText = result.failed ? ` ${result.failed} failed.` : "";
-      notify(`${result.deleted} profile(s) deleted.${failureText}`, result.failed ? "error" : "success");
-      const deletedIds = Array.isArray(result.deleted_profile_ids)
-        ? result.deleted_profile_ids
-        : (result.results || []).filter((item) => item.status === "deleted").map((item) => item.profile_id);
-      const deltaApplied = applyProfileDelta([], deletedIds);
-      if (Number(result.deleted || 0) !== deletedIds.length || !deltaApplied) {
-        notify("Deletion succeeded, but the table could not apply the returned profile IDs. Use Refresh to resynchronize.", "error");
-      }
-    } catch (error) {
-      notify(error.message, "error");
-    } finally {
-      setDeleteInFlight(false);
-    }
+      const deletedIds = Array.isArray(result.deleted_profile_ids) ? result.deleted_profile_ids : (result.results || []).filter((item) => item.status === "deleted").map((item) => item.profile_id);
+      notify(`Đã xóa ${result.deleted || 0} hồ sơ${result.failed ? `; ${result.failed} hồ sơ thất bại` : ""}.`, result.failed ? "error" : "success");
+      if (Number(result.deleted || 0) !== deletedIds.length || !applyProfileDelta([], deletedIds)) notify("Đã xóa nhưng bảng chưa thể cập nhật đầy đủ. Hãy bấm Làm mới.", "error");
+    } catch (error) { notify(userError(error), "error"); } finally { setDeleteInFlight(false); }
   };
 
-  return (
-    <div className="app-shell bg-ink text-slate-200">
-      <Header
-        query={query}
-        onQuery={setQuery}
-        sort={sort}
-        onSort={setSort}
-        onRefresh={loadProfiles}
-        refreshing={refreshing}
-      />
-      <main className="app-main">
-        <div className="dashboard-content">
-          <div className="grid flex-none grid-cols-3 gap-3">
-            <Summary icon={Activity} label="Total profiles" value={profiles.length} />
-            <Summary icon={ShieldCheck} label="Running now" value={profiles.filter((row) => row.status === "Running").length} tone="mint" />
-            <Summary icon={Globe2} label="Proxy enabled" value={profiles.filter((row) => row.proxy?.enabled).length} tone="amber" />
-          </div>
-          <ProfileTable
-            rows={visibleProfiles}
-            selected={selected}
-            onToggle={toggle}
-            onToggleAll={toggleAll}
-            onSelect={toggle}
-            onEdit={(row) => setModal({ type: "edit", profile: row })}
-          />
-          <div className="panel flex flex-none items-center justify-between gap-3 p-4">
-            <div>
-              <p className="eyebrow">Selected workspace</p>
-              <p className="mt-1 text-sm text-slate-300">{selectedProfile ? `${selectedProfile.stt} · ${selectedProfile.name}` : "Select one profile to see its details"}</p>
-            </div>
-            {runtime && <p className="text-xs text-slate-500">{runtime.runtime_name} {runtime.browser_version} · {runtime.browser_available ? "Ready" : "Runtime missing"}</p>}
-          </div>
-        </div>
-        <RightSidebar
-          selectedCount={selected.size}
-          delay={delay}
-          onDelay={setDelay}
-          onLaunch={launch}
-          onCreate={() => setModal({ type: "create" })}
-          onImport={() => setModal({ type: "import" })}
-          onExport={exportAccountData}
-          onEdit={() => selectedProfile && setModal({ type: "edit", profile: selectedProfile })}
-          onDelete={deleteSelected}
-          deleteInFlight={deleteInFlight}
-          onClear={() => setSelected(new Set())}
-          onCheckProxy={() => setModal({ type: "check", profile: selectedProfile })}
-          batch={batch}
-        />
-      </main>
-      {(modal?.type === "create" || modal?.type === "edit") && (
-        <ProfileEditorModal
-          profile={modal.profile}
-          onClose={() => setModal(null)}
-          onSaved={handleProfileSaved}
-          notify={notify}
-        />
-      )}
-      {modal?.type === "import" && <BatchImportDialog onClose={() => setModal(null)} onDone={handleImportDone} notify={notify} />}
-      {modal?.type === "check" && <ProxyCheckDialog profile={modal.profile} onClose={() => setModal(null)} notify={notify} />}
-      <Toasts items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
-    </div>
-  );
+  const cycleTheme = () => {
+    const order = ["system", "light", "dark"];
+    updatePreferences({ theme: order[(order.indexOf(preferences.theme) + 1) % order.length] });
+  };
+
+  return <div className="app-shell">
+    <Header query={query} onQuery={setQuery} sort={sort} onSort={setSort} onRefresh={loadProfiles} refreshing={refreshing} activeView={activeView} onNavigate={setActiveView} theme={preferences.theme} onThemeCycle={cycleTheme} />
+    {activeView === "settings" && <SettingsPage preferences={preferences} onPreferenceChange={updatePreferences} notify={notify} />}
+    {activeView === "about" && <AboutPage notify={notify} />}
+    {activeView === "profiles" && <main className="app-main"><div className="dashboard-content"><div className="summary-grid"><Summary icon={Activity} label="Tổng hồ sơ" value={profiles.length} /><Summary icon={ShieldCheck} label="Đang mở" value={profiles.filter((row) => row.status === "Running").length} tone="mint" /><Summary icon={Globe2} label="Có Proxy" value={profiles.filter((row) => row.proxy?.enabled).length} tone="amber" /></div><ProfileTable rows={visibleProfiles} selected={selected} onToggle={toggle} onToggleAll={toggleAll} onEdit={(row) => setModal({ type: "edit", profile: row })} onOpen={launchOne} visibleColumns={preferences.visible_columns} compact={preferences.density === "compact"} /><div className="workspace-strip"><div><p className="eyebrow">Hồ sơ đang chọn</p><p className="workspace-name">{selectedProfile ? `${selectedProfile.stt} · ${selectedProfile.name}` : "Chọn một hồ sơ để xem thông tin nhanh"}</p></div>{runtime && <p className={runtime.browser_available ? "runtime-inline runtime-ready" : "runtime-inline runtime-warning"}>{runtime.browser_available ? "Runtime sẵn sàng" : "Thiếu browser/chrome.exe"}</p>}</div></div><RightSidebar selectedCount={selected.size} delay={delay} onDelay={setDelay} onLaunch={launch} onCreate={() => setModal({ type: "create" })} onImport={() => setModal({ type: "import" })} onExport={exportAccountData} onEdit={() => selectedProfile && setModal({ type: "edit", profile: selectedProfile })} onDelete={deleteSelected} deleteInFlight={deleteInFlight} onClear={() => setSelected(new Set())} onCheckProxy={() => setModal({ type: "check", profile: selectedProfile })} batch={batch} collapsed={preferences.sidebar_collapsed} /></main>}
+    {(modal?.type === "create" || modal?.type === "edit") && <ProfileEditorModal profile={modal.profile} onClose={() => setModal(null)} onSaved={handleProfileSaved} notify={notify} />}
+    {modal?.type === "import" && <BatchImportDialog onClose={() => setModal(null)} onDone={handleImportDone} notify={notify} />}
+    {modal?.type === "check" && <ProxyCheckDialog profile={modal.profile} onClose={() => setModal(null)} notify={notify} />}
+    <Toasts items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
+  </div>;
 }
 
-function Summary({ icon: Icon, label, value, tone }) {
-  return <div className="panel flex items-center gap-3 p-4"><div className={`grid h-9 w-9 place-items-center rounded-lg ${tone === "mint" ? "bg-mint/10 text-mint" : tone === "amber" ? "bg-amber-300/10 text-amber-200" : "bg-accent/10 text-accent"}`}><Icon className="h-4 w-4" /></div><div><p className="text-xs text-slate-500">{label}</p><p className="mt-1 text-lg font-semibold text-white">{value}</p></div></div>;
-}
+function Summary({ icon: Icon, label, value, tone }) { return <div className="summary-card"><div className={`summary-icon ${tone || ""}`}><Icon className="h-4 w-4" /></div><div><p className="summary-label">{label}</p><p className="summary-value">{value}</p></div></div>; }

@@ -11,6 +11,7 @@ from datetime import datetime
 import io
 import json
 import re
+import subprocess
 import threading
 import time
 import uuid
@@ -1277,6 +1278,96 @@ class ProductAPI:
                 {key: item.get(key) for key in ("name", "reason", "enabled")}
                 for item in state.get("quarantined", [])
             ],
+        })
+
+    def get_ui_preferences(self):
+        """Read non-sensitive UI preferences from application-owned config."""
+        path = self.profile_service.paths.ui_preferences_json
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        allowed = {"theme", "density", "reduce_motion", "sidebar_collapsed", "visible_columns"}
+        result = {key: payload[key] for key in allowed if key in payload}
+        if isinstance(result.get("visible_columns"), list):
+            result["visible_columns"] = [str(value) for value in result["visible_columns"][:4]]
+        return _json_safe(result)
+
+    def save_ui_preferences(self, preferences):
+        """Validate and atomically persist presentation-only preferences."""
+        if not isinstance(preferences, dict):
+            raise ProfileManagerError("UI preferences must be an object.")
+        themes = {"light", "dark", "system"}
+        densities = {"comfortable", "compact"}
+        columns = {"account", "environment", "status", "last_opened"}
+        theme = str(preferences.get("theme", "system"))
+        density = str(preferences.get("density", "comfortable"))
+        visible = preferences.get("visible_columns", sorted(columns))
+        if theme not in themes or density not in densities or not isinstance(visible, list):
+            raise ProfileManagerError("UI preferences contain an unsupported value.")
+        normalized = {
+            "theme": theme,
+            "density": density,
+            "reduce_motion": bool(preferences.get("reduce_motion", False)),
+            "sidebar_collapsed": bool(preferences.get("sidebar_collapsed", False)),
+            "visible_columns": [value for value in dict.fromkeys(map(str, visible)) if value in columns],
+        }
+        if not normalized["visible_columns"]:
+            normalized["visible_columns"] = sorted(columns)
+        path = self.profile_service.paths.ui_preferences_json
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        return normalized
+
+    def get_about_info(self):
+        """Return repository-derived, non-sensitive project metadata."""
+        root = Path(self.profile_service.paths.project_root)
+
+        def git(*arguments):
+            try:
+                result = subprocess.run(
+                    ["git", *arguments], cwd=root, capture_output=True,
+                    text=True, timeout=2, check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return ""
+            return result.stdout.strip() if result.returncode == 0 else ""
+
+        remote = git("remote", "get-url", "origin")
+        if remote.startswith("git@") and ":" in remote:
+            host, path = remote[4:].split(":", 1)
+            remote = f"https://{host}/{path}"
+        if remote.endswith(".git"):
+            remote = remote[:-4]
+        # Avoid returning credentials if a developer has configured a remote
+        # with embedded user-info.
+        if "@" in remote.split("://")[-1].split("/")[0]:
+            scheme, remainder = remote.split("://", 1)
+            remote = f"{scheme}://{remainder.split('@', 1)[-1]}"
+        authors = git("log", "--format=%aN", "--all").splitlines()
+        contributors = list(dict.fromkeys(name.strip() for name in authors if name.strip()))[:20]
+        return _json_safe({
+            "name": "Discord Profile Manager",
+            "status": "Phiên bản phát triển — Pre-final",
+            "commit": git("rev-parse", "--short", "HEAD") or "local",
+            "branch": git("branch", "--show-current") or "không xác định",
+            "repository": remote or None,
+            "contributors": contributors,
+            "license": "LICENSE" if (root / "LICENSE").is_file() else "Chưa xác định",
+            "stack": ["Python", "pywebview", "React", "Vite", "Tailwind CSS"],
         })
 
     def set_optional_extension_policy(self, extension_name, enabled):

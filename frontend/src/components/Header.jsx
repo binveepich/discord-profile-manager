@@ -1,34 +1,73 @@
-import { ChevronDown, RefreshCw, Search, SlidersHorizontal } from "lucide-react";
+import {
+  CircleHelp,
+  Moon,
+  RefreshCw,
+  Search,
+  Settings,
+  SlidersHorizontal,
+  Sun,
+} from "lucide-react";
+import { UI } from "../i18n";
 
-export default function Header({ query, onQuery, sort, onSort, onRefresh, refreshing }) {
+export default function Header({
+  query,
+  onQuery,
+  sort,
+  onSort,
+  onRefresh,
+  refreshing,
+  activeView,
+  onNavigate,
+  theme,
+  onThemeCycle,
+}) {
+  const ThemeIcon = theme === "light" ? Sun : theme === "dark" ? Moon : CircleHelp;
   return (
-    <header className="flex flex-none flex-col gap-5 border-b border-line/80 px-6 py-5 lg:flex-row lg:items-center lg:justify-between">
-      <div className="flex items-center gap-3">
-        <div className="grid h-10 w-10 place-items-center rounded-xl bg-accent text-white shadow-lg shadow-accent/20">
-          <span className="text-lg font-black">D</span>
-        </div>
+    <header className="app-header">
+      <div className="brand-block">
+        <div className="brand-mark" aria-hidden="true">D</div>
         <div>
-          <h1 className="text-base font-semibold tracking-wide text-white">Discord Profile Manager</h1>
-          <p className="mt-0.5 text-xs text-slate-500">Isolated browser workspace</p>
+          <h1 className="brand-title">{UI.appName}</h1>
+          <p className="brand-subtitle">Quản lý các phiên trình duyệt độc lập</p>
         </div>
       </div>
-      <div className="flex flex-1 flex-wrap items-center justify-end gap-2 lg:ml-8">
-        <label className="relative min-w-[220px] flex-1 lg:max-w-sm">
-          <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
-          <input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search profiles, accounts, proxy..." className="control w-full pl-9" />
-        </label>
-        <div className="relative">
-          <SlidersHorizontal className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
-          <select value={sort} onChange={(event) => onSort(event.target.value)} className="control appearance-none pl-9 pr-9">
-            <option value="stt">STT order</option>
-            <option value="name">Name</option>
-            <option value="id">ID</option>
-            <option value="status">Status</option>
-            <option value="last_opened">Last opened</option>
-          </select>
-          <ChevronDown className="pointer-events-none absolute right-3 top-2.5 h-4 w-4 text-slate-500" />
-        </div>
-        <button className="icon-button" onClick={onRefresh} title="Refresh profile list" disabled={refreshing}><RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} /></button>
+
+      <nav className="main-nav" aria-label="Điều hướng chính">
+        <button className={`nav-item ${activeView === "profiles" ? "nav-item-active" : ""}`} onClick={() => onNavigate("profiles")}>
+          Hồ sơ
+        </button>
+        <button className={`nav-item ${activeView === "settings" ? "nav-item-active" : ""}`} onClick={() => onNavigate("settings")}>
+          <Settings className="h-4 w-4" /> Cài đặt
+        </button>
+        <button className={`nav-item ${activeView === "about" ? "nav-item-active" : ""}`} onClick={() => onNavigate("about")}>
+          <CircleHelp className="h-4 w-4" /> Giới thiệu
+        </button>
+      </nav>
+
+      <div className="header-tools">
+        {activeView === "profiles" && <>
+          <label className="search-field">
+            <Search className="pointer-events-none h-4 w-4" />
+            <input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Tìm hồ sơ, tài khoản, Proxy…" aria-label="Tìm kiếm hồ sơ" />
+          </label>
+          <label className="sort-field">
+            <SlidersHorizontal className="pointer-events-none h-4 w-4" />
+            <select value={sort} onChange={(event) => onSort(event.target.value)} aria-label="Sắp xếp hồ sơ">
+              <option value="stt">Theo STT</option>
+              <option value="name">Tên hồ sơ</option>
+              <option value="id">Mã hồ sơ</option>
+              <option value="status">Trạng thái</option>
+              <option value="last_opened">Mở gần đây</option>
+            </select>
+          </label>
+          <button className="icon-button" onClick={onRefresh} title="Làm mới danh sách" aria-label="Làm mới danh sách" disabled={refreshing}>
+            <RefreshCw className={refreshing ? "spin-once h-4 w-4" : "h-4 w-4"} />
+          </button>
+        </>}
+        <button className="theme-button" onClick={onThemeCycle} title="Đổi giao diện" aria-label={`Giao diện: ${UI.theme[theme] || UI.theme.system}`}>
+          <ThemeIcon className="h-4 w-4" />
+          <span>{UI.theme[theme] || UI.theme.system}</span>
+        </button>
       </div>
     </header>
   );

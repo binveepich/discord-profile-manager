@@ -192,6 +192,11 @@ class ProjectPaths:
         """Application-owned global extension enablement policy."""
         return self.config_dir / "extensions.json"
 
+    @property
+    def ui_preferences_json(self):
+        """Application-owned UI preferences, separate from Chromium state."""
+        return self.config_dir / "ui_preferences.json"
+
     # Keep the shorter name available to callers that treat the file as the
     # global extension registry policy rather than as profile metadata.
     @property

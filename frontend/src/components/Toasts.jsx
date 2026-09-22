@@ -1,3 +1,5 @@
+import { CheckCircle2, X, XCircle } from "lucide-react";
+
 export default function Toasts({ items, onDismiss }) {
-  return <div className="fixed bottom-5 right-5 z-50 flex w-[min(360px,calc(100vw-2rem))] flex-col gap-2">{items.map((item) => <button key={item.id} onClick={() => onDismiss(item.id)} className={`rounded-xl border px-4 py-3 text-left text-sm shadow-panel ${item.type === "error" ? "border-rose-400/30 bg-[#28151d] text-rose-200" : "border-mint/30 bg-[#12241f] text-mint"}`}>{item.message}</button>)}</div>;
+  return <div className="toast-stack" aria-live="polite">{items.map((item) => <div className={`toast ${item.type === "error" ? "toast-error" : "toast-success"}`} key={item.id}><span className="toast-icon">{item.type === "error" ? <XCircle className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}</span><p>{item.message}</p><button onClick={() => onDismiss(item.id)} aria-label="Đóng thông báo"><X className="h-4 w-4" /></button></div>)}</div>;
 }
