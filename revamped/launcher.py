@@ -40,6 +40,8 @@ class ChromiumLauncher:
         extension_service=None,
         process_inspector=None,
         process_factory=None,
+        environment_argument_builder=None,
+        environment_notes_builder=None,
         logger=None,
     ):
         self.paths = paths
@@ -48,12 +50,17 @@ class ChromiumLauncher:
         self.launcher_path = Path(paths.browser_exe)
         self.process_inspector = process_inspector or ChromiumProcessInspector()
         self.process_factory = process_factory or subprocess.Popen
+        self.environment_argument_builder = (
+            environment_argument_builder or environment_launch_arguments
+        )
+        self.environment_notes_builder = (
+            environment_notes_builder or environment_runtime_notes
+        )
         self.logger = logger or _NullLogger()
         self._processes = {}
 
-    @staticmethod
-    def build_environment_arguments(record):
-        return environment_launch_arguments(record)
+    def build_environment_arguments(self, record):
+        return self.environment_argument_builder(record)
 
     @staticmethod
     def build_proxy_arguments(record):
@@ -122,7 +129,7 @@ class ChromiumLauncher:
             command = self.build_command(
                 profile_id, profile_data_dir, profile_record, extension_paths
             )
-            for note in environment_runtime_notes(profile_record):
+            for note in self.environment_notes_builder(profile_record):
                 self.logger.warning("Profile %s environment: %s", profile_id, note)
             self.logger.info("Requesting Chromium launch for profile %s", profile_id)
             try:
@@ -144,3 +151,20 @@ class ChromiumLauncher:
                 raise
             except OSError as error:
                 raise ProfileManagerError(f"Cannot launch Chromium: {error}") from error
+
+    def close_profile(self, profile_id, timeout=2.0):
+        """Close a Chromium process started by this launcher, when owned.
+
+        Processes discovered after an application restart are deliberately not
+        force-killed here; the caller will report that profile as undeletable
+        until the user closes it normally.
+        """
+        process = self._processes.get(str(profile_id))
+        if process is None or process.poll() is not None:
+            return False
+        try:
+            process.terminate()
+            process.wait(timeout=max(0.1, float(timeout)))
+        except (OSError, subprocess.TimeoutExpired, TimeoutError, ValueError):
+            return False
+        return process.poll() is not None

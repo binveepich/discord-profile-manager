@@ -39,6 +39,119 @@ class ProxyValidationError(ProfileManagerError):
     """A proxy value is outside the supported unauthenticated policy."""
 
 
+WORKSPACE_DEVELOPMENT = "development"
+WORKSPACE_PRODUCT = "product"
+PRODUCT_WORKSPACE_MARKER = ".discord-profile-manager-product-root"
+
+
+def normalize_workspace_kind(value):
+    """Return the canonical workspace kind or reject an ambiguous value."""
+    if not isinstance(value, str):
+        raise ProfileManagerError("Workspace kind must be Development or Product.")
+    normalized = value.strip().casefold().replace("_", "-").replace(" ", "-")
+    if normalized in {"development", "dev", "disposable", "safe"}:
+        return WORKSPACE_DEVELOPMENT
+    if normalized in {"product", "explicit-product"}:
+        return WORKSPACE_PRODUCT
+    raise ProfileManagerError("Workspace kind must be Development or Product.")
+
+
+def resolve_workspace_root(
+    value,
+    *,
+    allowed_parent=None,
+    forbidden_roots=(),
+    reject_forbidden_ancestors=False,
+    description="workspace",
+):
+    """Resolve one explicit writable root under a shared containment policy."""
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        raise ProfileManagerError(f"An explicit {description} root is required.")
+    raw_candidate = Path(value).absolute()
+    try:
+        # Inspect the lexical path before resolving it.  Resolving first would
+        # erase a final symlink/junction from the path and could accidentally
+        # turn a linked alias into an apparently safe product root.
+        checked_path(raw_candidate, raw_candidate.parent)
+    except ProfileManagerError as error:
+        raise ProfileManagerError(
+            f"The explicit {description} root is not a safe filesystem path."
+        ) from error
+    candidate = raw_candidate.resolve()
+    if allowed_parent is not None:
+        parent = Path(allowed_parent).absolute().resolve()
+        if candidate == parent or not candidate.is_relative_to(parent):
+            raise ProfileManagerError(
+                f"The {description} root must be below the approved disposable root."
+            )
+    for forbidden in forbidden_roots:
+        forbidden = Path(forbidden).absolute().resolve()
+        candidate_is_forbidden = candidate == forbidden or candidate.is_relative_to(forbidden)
+        forbidden_is_inside_candidate = forbidden.is_relative_to(candidate)
+        if candidate_is_forbidden or (
+            reject_forbidden_ancestors and forbidden_is_inside_candidate
+        ):
+            raise ProfileManagerError(
+                f"The explicit {description} root would target protected live state."
+            )
+    try:
+        checked_path(candidate, candidate.parent)
+    except ProfileManagerError as error:
+        raise ProfileManagerError(
+            f"The explicit {description} root is not a safe filesystem path."
+        ) from error
+    return candidate
+
+
+def prepare_product_workspace(root, *, forbidden_roots=()):
+    """Approve an explicit product root without importing existing state."""
+    root = resolve_workspace_root(
+        root,
+        forbidden_roots=forbidden_roots,
+        reject_forbidden_ancestors=True,
+        description="product workspace",
+    )
+    marker = checked_path(root / PRODUCT_WORKSPACE_MARKER, root)
+    if root.exists():
+        try:
+            children = list(root.iterdir())
+        except OSError as error:
+            raise ProfileManagerError(
+                "The explicit product workspace cannot be inspected."
+            ) from error
+        if marker.exists():
+            try:
+                marker_text = marker.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                raise ProfileManagerError(
+                    "The product workspace marker is unreadable; no data was changed."
+                ) from error
+            if marker_text != "workspace=product\nversion=1\n":
+                raise ProfileManagerError(
+                    "The product workspace marker is invalid; no data was changed."
+                )
+        elif children:
+            raise ProfileManagerError(
+                "The explicit product workspace is not product-owned. Choose an empty root "
+                "or a workspace previously initialized in Product mode; no legacy data was imported."
+            )
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+    if not marker.exists():
+        try:
+            with open(marker, "x", encoding="utf-8", newline="") as stream:
+                stream.write("workspace=product\nversion=1\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError:
+            pass
+        except (OSError, UnicodeError) as error:
+            raise ProfileManagerError(
+                "The product workspace could not be initialized safely."
+            ) from error
+    return root
+
+
 @dataclass(frozen=True)
 class ProjectPaths:
     """Separate writable state paths from repository-owned read-only assets.

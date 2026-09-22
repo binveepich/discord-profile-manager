@@ -69,20 +69,19 @@ class ExtensionTests(unittest.TestCase):
 
         self.assertEqual(
             list(discovered),
-            ["discord-autofill-extension", "discord-token-extractor-extension", "future-extension"],
+            ["discord-autofill-extension", "future-extension"],
         )
         self.assertEqual(
             set(discovered),
             {
                 self.manager.AUTOFILL_EXTENSION_NAME,
-                self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
                 "future-extension",
             },
         )
 
     def test_required_deployment_is_multi_extension_and_profile_local(self):
         self.make_source()
-        token = self.make_manifest_extension(
+        self.make_manifest_extension(
             self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
             {"manifest_version": 3, "background": {"service_worker": "background.js"}},
             {"background.js": "const SOURCE = true;"},
@@ -101,16 +100,20 @@ class ExtensionTests(unittest.TestCase):
 
         self.assertEqual(
             [path.name for path in first_paths],
-            [self.manager.AUTOFILL_EXTENSION_NAME, self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME],
+            [self.manager.AUTOFILL_EXTENSION_NAME],
         )
         self.assertEqual(
             [path.name for path in extensions.get_profile_extension_paths(first)],
-            [self.manager.AUTOFILL_EXTENSION_NAME, self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME],
+            [self.manager.AUTOFILL_EXTENSION_NAME],
         )
-        first_token = next(path for path in first_paths if path.name == token.name)
-        second_token = next(path for path in second_paths if path.name == token.name)
-        (first_token / "profile-local.fixture").write_text("first", encoding="utf-8")
-        self.assertFalse((second_token / "profile-local.fixture").exists())
+        self.assertFalse(
+            (profiles.get_profile_dir(first) / "Unpacked Extensions" /
+             self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME).exists()
+        )
+        self.assertFalse(
+            (profiles.get_profile_dir(second) / "Unpacked Extensions" /
+             self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME).exists()
+        )
         self.make_runtime()
         self.assertTrue(self.manager.ChromiumLauncher().launch_discord(first, first_paths))
         command = self.popen.call_args.args[0]

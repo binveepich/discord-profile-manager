@@ -4,7 +4,8 @@ from datetime import datetime
 from pathlib import Path
 
 from . import environment, proxy
-from .core import ProfileManagerError
+from .accounts import ACCOUNT_MODE_DEVELOPMENT, ACCOUNT_MODE_PRODUCT, normalize_account_mode
+from .core import ProfileManagerError, normalize_workspace_kind
 from .models import PROFILE_TABLE_COLUMNS, PROFILE_TABLE_DATA_COLUMNS
 from .processes import ChromiumProcessInspector
 
@@ -77,7 +78,12 @@ class ProfileTableModel:
         """Return only an account identifier; never expose account secrets."""
         try:
             account = self.account_service.get_account(profile_id)
-            email = account.get("email") if isinstance(account, dict) else None
+            if not isinstance(account, dict):
+                email = None
+            else:
+                email = account.get("email") or account.get("email_identifier")
+                if not email:
+                    email = account.get("label") or account.get("account_label")
             return str(email) if email else "—"
         except (AttributeError, KeyError, ProfileManagerError, OSError, TypeError):
             return "—"
@@ -281,6 +287,15 @@ class ProfileGUIController:
         self._search_after_id = None
         self._status_after_id = None
         self._closing = False
+
+    @property
+    def account_mode(self):
+        """Return the selected account UX mode with a safe legacy default."""
+        value = getattr(self.account_service, "account_mode", None)
+        try:
+            return normalize_account_mode(value)
+        except ProfileManagerError:
+            return ACCOUNT_MODE_DEVELOPMENT
 
     @property
     def profiles(self):
@@ -638,7 +653,25 @@ class ProfileGUIController:
         account = self.account_service.get_account(profile_id)
         if not account:
             return None
+        if account.get("mode") == ACCOUNT_MODE_PRODUCT:
+            return {
+                "mode": ACCOUNT_MODE_PRODUCT,
+                "profile_id": profile_id,
+                "display_name": display_name,
+                "label": account.get("label") or "Not set",
+                "email": self.account_service.mask_email(account.get("email", "")),
+                "sensitive_values": "Not stored or supported",
+            }
+        if account.get("mode") == ACCOUNT_MODE_DEVELOPMENT and "password" not in account:
+            return {
+                "mode": ACCOUNT_MODE_DEVELOPMENT,
+                "profile_id": profile_id,
+                "display_name": display_name,
+                "email": self.account_service.mask_email(account.get("email", "")),
+                "sensitive_values": "Not stored or supported",
+            }
         return {
+            "mode": ACCOUNT_MODE_DEVELOPMENT,
             "profile_id": profile_id,
             "display_name": display_name,
             "email": self.account_service.mask_email(account["email"]),
@@ -651,6 +684,18 @@ class ProfileGUIController:
         if not selected or self.account_service is None:
             return False
         self.account_service.set_account(selected[0], account_string)
+        self.refresh()
+        self.set_selection([selected[0]])
+        return True
+
+    def set_product_account(self, email_identifier, label=None):
+        selected = self.get_selected_profile()
+        if not selected or self.account_service is None:
+            return False
+        setter = getattr(self.account_service, "set_product_account", None)
+        if not callable(setter):
+            raise ProfileManagerError("Interactive Product Account Mode is unavailable.")
+        setter(selected[0], email_identifier, label)
         self.refresh()
         self.set_selection([selected[0]])
         return True
@@ -770,8 +815,40 @@ class TkRevampedApp:
         self._closing = False
         self._buttons = {}
         self._build_widgets()
-        self.root.title(self.TITLE)
+        self.root.title(self._window_title())
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
+
+    def _workspace_kind(self):
+        value = getattr(self.controller, "workspace_kind", None)
+        try:
+            return normalize_workspace_kind(value)
+        except ProfileManagerError:
+            return "development"
+
+    def _window_title(self):
+        if self._workspace_kind() == "product":
+            return "Discord Profile Manager — PRODUCT"
+        return self.TITLE
+
+    def _workspace_banner(self):
+        if self._workspace_kind() == "product":
+            return "Explicit product workspace - Chromium launch disabled by default"
+        return "Disposable workspace - Chromium launch disabled by default"
+
+    def _account_mode(self):
+        value = getattr(self.controller, "account_mode", None)
+        try:
+            return normalize_account_mode(value)
+        except ProfileManagerError:
+            return ACCOUNT_MODE_DEVELOPMENT
+
+    def _account_mode_text(self):
+        if self._account_mode() == ACCOUNT_MODE_PRODUCT:
+            return (
+                "Interactive Product Mode - account labels and identifiers persist; "
+                "passwords, tokens, and TOTP are not stored"
+            )
+        return "Synthetic Development Mode - @example.invalid only"
 
     def _build_widgets(self):
         tk = self.tk
@@ -784,14 +861,21 @@ class TkRevampedApp:
         header = tk.Frame(outer)
         header.pack(fill=tk.X, pady=(0, 8))
         tk.Label(
-            header, text=self.TITLE, font=("Segoe UI", 16, "bold"), anchor="w"
+            header, text=self._window_title(), font=("Segoe UI", 16, "bold"), anchor="w"
         ).pack(side=tk.LEFT)
         tk.Label(
             header,
-            text="Disposable workspace • Chromium launch disabled by default",
+            text=self._workspace_banner(),
             fg="#8a4b08",
             anchor="e",
         ).pack(side=tk.RIGHT)
+
+        tk.Label(
+            outer,
+            text=self._account_mode_text(),
+            fg="#8a4b08",
+            anchor="w",
+        ).pack(fill=tk.X, pady=(0, 5))
 
         search_bar = tk.Frame(outer)
         search_bar.pack(fill=tk.X, pady=(0, 7))
@@ -868,7 +952,12 @@ class TkRevampedApp:
         )
         tk.Frame(sidebar, height=8).pack()
         self._button(sidebar, "extensions", "Extensions...", self.manage_extensions)
-        self._button(sidebar, "set_account", "Set Synthetic Account", self.set_account)
+        account_button = (
+            "Set Product Account"
+            if self._account_mode() == ACCOUNT_MODE_PRODUCT
+            else "Set Synthetic Account"
+        )
+        self._button(sidebar, "set_account", account_button, self.set_account)
         self._button(sidebar, "view_account", "View Account", self.view_account)
         self._button(sidebar, "remove_account", "Remove Account", self.remove_account)
         self._button(sidebar, "select_all", "Select All", self.select_all)
@@ -971,11 +1060,22 @@ class TkRevampedApp:
 
     def open_discord(self):
         if not self.allow_browser_launch:
+            if self._workspace_kind() == "product":
+                title = "REVAMPED PRODUCT mode"
+                message = (
+                    "Chromium launch is disabled by default in the explicit product workspace. "
+                    "Re-run with --allow-browser-launch only when you intentionally want to test this product root."
+                )
+            else:
+                title = "REVAMPED DEV mode"
+                message = (
+                    "Chromium launch is disabled by default in disposable development mode. "
+                    "No production browser or profile will be opened. Re-run with "
+                    "--allow-browser-launch only when you intentionally want to test the disposable runtime."
+                )
             self.dialogs.info(
-                "REVAMPED DEV mode",
-                "Chromium launch is disabled by default in disposable development mode. "
-                "No production browser or profile will be opened. Re-run with "
-                "--allow-browser-launch only when you intentionally want to test the disposable runtime.",
+                title,
+                message,
             )
             return
         self.controller.open_selected()
@@ -1008,9 +1108,21 @@ class TkRevampedApp:
     def set_account(self):
         if self.controller.get_selected_profile() is None:
             return
+        if self._account_mode() == ACCOUNT_MODE_PRODUCT:
+            return self.set_product_account()
+        strict_development = not getattr(
+            getattr(self.controller, "account_service", None),
+            "allow_synthetic_credentials",
+            True,
+        )
+        prompt = (
+            "Enter a synthetic @example.invalid account identifier only:"
+            if strict_development
+            else "Enter synthetic email:password[:totp] using example.invalid only:"
+        )
         account = self.dialogs.ask_string(
             "Synthetic Account",
-            "Enter synthetic email:password[:totp] using example.invalid only:",
+            prompt,
         )
         if account is None:
             return
@@ -1021,11 +1133,68 @@ class TkRevampedApp:
                 "Disposable GUI testing accepts only an email ending in @example.invalid.",
             )
             return
+        if strict_development and ":" in account:
+            self.dialogs.warning(
+                "Synthetic Account",
+                "Development mode refuses passwords, tokens, and TOTP values; provide only the synthetic identifier.",
+            )
+            return
         try:
             self.controller.set_account(account)
             self._render()
         except Exception as error:
             self.dialogs.error("Account", f"Could not save synthetic account:\n{error}")
+
+    def set_product_account(self):
+        """Collect safe product metadata without offering credential fields."""
+        if self.controller.get_selected_profile() is None:
+            return
+        tk = self.tk
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Product Account")
+        dialog.transient(self.root)
+        form = tk.Frame(dialog, padx=18, pady=14)
+        form.pack(fill=tk.BOTH, expand=True)
+        label_var = tk.StringVar()
+        email_var = tk.StringVar()
+        tk.Label(form, text="Account label (optional)").grid(
+            row=0, column=0, sticky="w", pady=4
+        )
+        tk.Entry(form, textvariable=label_var).grid(
+            row=0, column=1, sticky="ew", pady=4
+        )
+        tk.Label(form, text="Email / account identifier").grid(
+            row=1, column=0, sticky="w", pady=4
+        )
+        tk.Entry(form, textvariable=email_var).grid(
+            row=1, column=1, sticky="ew", pady=4
+        )
+        tk.Label(
+            form,
+            text=(
+                "Interactive Product Mode stores only this label and identifier. "
+                "Passwords, authentication tokens, and TOTP secrets are not stored or supported."
+            ),
+            wraplength=420,
+            justify=tk.LEFT,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 10))
+        form.columnconfigure(1, weight=1)
+
+        def save():
+            try:
+                self.controller.set_product_account(
+                    email_var.get(), label_var.get()
+                )
+                dialog.destroy()
+                self._render()
+            except Exception as error:
+                self.dialogs.error("Product Account", f"Could not save account metadata:\n{error}")
+
+        tk.Button(form, text="Save", command=save).grid(row=3, column=0, pady=(8, 0))
+        tk.Button(form, text="Cancel", command=dialog.destroy).grid(
+            row=3, column=1, sticky="e", pady=(8, 0)
+        )
+        dialog.grab_set()
 
     def view_account(self):
         try:
@@ -1035,6 +1204,15 @@ class TkRevampedApp:
             return
         if data is None:
             self.dialogs.info("Account", "No account is configured for this profile.")
+            return
+        if data.get("mode") == ACCOUNT_MODE_PRODUCT:
+            self.dialogs.info(
+                "Product Account",
+                f"Profile: {data['display_name']}\n"
+                f"Label: {data['label']}\n"
+                f"Email / identifier: {data['email']}\n"
+                f"Sensitive values: {data['sensitive_values']}",
+            )
             return
         self.dialogs.info(
             "Account (masked)",
@@ -1198,20 +1376,16 @@ class TkRevampedApp:
         identity_vars = {
             "user_agent": tk.StringVar(value=str(identity.get("user_agent") or "")),
             "language": tk.StringVar(value=str(identity.get("language") or "")),
-            "device_scale_factor": tk.StringVar(
-                value="" if identity.get("device_scale_factor") is None else str(identity.get("device_scale_factor"))
-            ),
             "timezone": tk.StringVar(value=str(identity.get("timezone") or "")),
         }
         identity_entries = {}
         identity_labels = {
             "user_agent": "User-Agent",
             "language": "Language / locale",
-            "device_scale_factor": "DPR",
             "timezone": "Timezone (metadata only — not runtime-applied)",
         }
         for row, key in enumerate(
-            ("user_agent", "language", "device_scale_factor", "timezone"), 2
+            ("user_agent", "language", "timezone"), 2
         ):
             tk.Label(form, text=identity_labels[key]).grid(
                 row=row, column=0, sticky="w", pady=3
@@ -1492,12 +1666,11 @@ class TkRevampedApp:
         labels = {
             "viewport_width": "Browser window width",
             "viewport_height": "Browser window height",
-            "device_scale_factor": "Device scale factor",
             "language": "Browser UI language",
             "timezone": "Timezone (saved only)",
         }
         for row, key in enumerate(
-            ("viewport_width", "viewport_height", "device_scale_factor", "language", "timezone"), 1
+            ("viewport_width", "viewport_height", "language", "timezone"), 1
         ):
             variables[key] = tk.StringVar(value="" if state.get(key) is None else str(state.get(key)))
             tk.Label(form, text=labels[key]).grid(row=row, column=0, sticky="w", pady=3)

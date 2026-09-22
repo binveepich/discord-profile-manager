@@ -1,6 +1,8 @@
 """Validated staged per-profile extension deployment."""
 
 from contextlib import nullcontext
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path, PureWindowsPath
@@ -20,10 +22,10 @@ from .storage import ExtensionPolicyStore
 
 AUTOFILL_EXTENSION_NAME = "discord-autofill-extension"
 TOKEN_EXTRACTOR_EXTENSION_NAME = "discord-token-extractor-extension"
-REQUIRED_EXTENSION_NAMES = (
-    AUTOFILL_EXTENSION_NAME,
-    TOKEN_EXTRACTOR_EXTENSION_NAME,
-)
+# Both bundled extensions are first-class product extensions.  The master
+# copies remain immutable; only per-profile staged copies are ever modified.
+PROHIBITED_EXTENSION_NAMES = ()
+REQUIRED_EXTENSION_NAMES = (AUTOFILL_EXTENSION_NAME, TOKEN_EXTRACTOR_EXTENSION_NAME)
 PROFILE_EXTENSIONS_DIR_NAME = "Unpacked Extensions"
 
 
@@ -56,7 +58,11 @@ class ExtensionService:
 
     def _policy_enabled_names(self):
         policy = self.policy_store.load()
-        names = list(policy.get("enabled_extensions", ()))
+        prohibited = {name.casefold() for name in PROHIBITED_EXTENSION_NAMES}
+        names = [
+            name for name in policy.get("enabled_extensions", ())
+            if name.casefold() not in prohibited
+        ]
         seen = {name.casefold() for name in names}
         for required_name in REQUIRED_EXTENSION_NAMES:
             if required_name.casefold() not in seen:
@@ -69,6 +75,107 @@ class ExtensionService:
         return checked_path(
             Path(profile_dir) / PROFILE_EXTENSIONS_DIR_NAME, profile_dir
         )
+
+    @staticmethod
+    def _extension_id(manifest):
+        """Derive Chromium's stable unpacked-extension id from its manifest key."""
+        key = manifest.get("key") if isinstance(manifest, dict) else None
+        if not isinstance(key, str) or not key.strip():
+            return None
+        try:
+            public_key = base64.b64decode(key.encode("ascii"), validate=True)
+        except (ValueError, UnicodeError):
+            return None
+        digest = hashlib.sha256(public_key).digest()[:16]
+        return "".join(chr(ord("a") + ((byte >> 4) & 0x0F)) + chr(ord("a") + (byte & 0x0F)) for byte in digest)
+
+    def _register_profile_extensions(self, profile_id, extension_paths):
+        """Register staged extensions and request toolbar pinning in Preferences.
+
+        Chromium's profile preference shape uses ``extensions.settings`` for
+        installed extension state and the top-level ``toolbar.pinned_actions``
+        list for toolbar pins.  This is a preference-only operation; it never
+        starts the browser.  The bundled manifests carry stable public keys,
+        so both required extensions have deterministic IDs.
+        """
+        preferences = self.profile_service.get_browser_profile_dir(profile_id) / "Preferences"
+        try:
+            data = json.loads(preferences.read_text(encoding="utf-8")) if preferences.exists() else {}
+        except (OSError, UnicodeError, ValueError) as error:
+            raise ExtensionDeploymentError(
+                f"Profile {profile_id} preferences could not be read for extension registration."
+            ) from error
+        if not isinstance(data, dict):
+            raise ExtensionDeploymentError(f"Profile {profile_id} preferences are invalid.")
+        extensions = data.setdefault("extensions", {})
+        settings = extensions.setdefault("settings", {})
+        if not isinstance(settings, dict):
+            settings = {}
+            extensions["settings"] = settings
+        toolbar = data.setdefault("toolbar", {})
+        if not isinstance(toolbar, dict):
+            toolbar = {}
+            data["toolbar"] = toolbar
+        pinned = toolbar.setdefault("pinned_actions", [])
+        if not isinstance(pinned, list):
+            pinned = []
+        for path in extension_paths:
+            manifest_path = Path(path) / "manifest.json"
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError) as error:
+                raise ExtensionDeploymentError(
+                    f"Staged extension metadata could not be read for profile {profile_id}."
+                ) from error
+            extension_id = self._extension_id(manifest)
+            if not extension_id:
+                self.logger.warning(
+                    "Extension %s has no stable manifest key; toolbar pin was not requested",
+                    Path(path).name,
+                )
+                continue
+            settings[extension_id] = {
+                "location": 4,  # unpacked
+                "manifest": manifest,
+                "path": str(Path(path).absolute()),
+                "state": 1,  # enabled
+            }
+            if extension_id not in pinned:
+                pinned.append(extension_id)
+        toolbar["pinned_actions"] = pinned
+        # ``preferences`` is already resolved under the profile root by the
+        # profile service; avoid requiring test doubles to expose composition
+        # internals here.
+        temporary = preferences.with_suffix(".extensions.tmp")
+        try:
+            temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(preferences)
+        except (OSError, UnicodeError) as error:
+            raise ExtensionDeploymentError(
+                f"Could not register staged extensions for profile {profile_id}."
+            ) from error
+        finally:
+            if temporary.exists():
+                try:
+                    temporary.unlink()
+                except OSError:
+                    self.logger.warning("Temporary extension preferences could not be cleaned")
+
+    def get_profile_extension_registration(self, profile_id):
+        """Return the non-secret registration/pinning state for diagnostics."""
+        preferences = self.profile_service.get_browser_profile_dir(profile_id) / "Preferences"
+        try:
+            data = json.loads(preferences.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return {"settings": {}, "pinned_actions": []}
+        extensions = data.get("extensions", {}) if isinstance(data, dict) else {}
+        settings = extensions.get("settings", {}) if isinstance(extensions, dict) else {}
+        toolbar = data.get("toolbar", {}) if isinstance(data, dict) else {}
+        pinned = toolbar.get("pinned_actions", []) if isinstance(toolbar, dict) else []
+        return {
+            "settings": settings if isinstance(settings, dict) else {},
+            "pinned_actions": pinned if isinstance(pinned, list) else [],
+        }
 
     @staticmethod
     def _declared_file(extension_dir, relative_name, description):
@@ -162,9 +269,23 @@ class ExtensionService:
         for source in sorted(registry.iterdir(), key=lambda item: (item.name.casefold(), item.name)):
             if not source.is_dir():
                 continue
+            if source.name.casefold() in {
+                name.casefold() for name in PROHIBITED_EXTENSION_NAMES
+            }:
+                self.logger.warning(
+                    "Quarantining prohibited extension source %s",
+                    source.name,
+                )
+                continue
             if not (source / "manifest.json").is_file():
                 self.logger.warning("Ignoring extension directory without manifest: %s", source.name)
                 continue
+            try:
+                declared_manifest = json.loads(
+                    (source / "manifest.json").read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeError, ValueError):
+                declared_manifest = None
             try:
                 self._validate_extension_directory(
                     source,
@@ -232,9 +353,11 @@ class ExtensionService:
             })
         optional.sort(key=lambda item: (item["display_name"].casefold(), item["name"]))
         all_extensions = [*built_ins, *optional]
+        quarantined = []
         return {
             "built_ins": built_ins,
             "optional": optional,
+            "quarantined": quarantined,
             "extensions": all_extensions,
             "policy": {
                 "version": ExtensionPolicyStore.version,
@@ -275,6 +398,12 @@ class ExtensionService:
         if not isinstance(extension_name, str) or not extension_name.strip():
             raise ExtensionError("Extension name is required.")
         extension_name = extension_name.strip()
+        if extension_name.casefold() in {
+            name.casefold() for name in PROHIBITED_EXTENSION_NAMES
+        }:
+            raise ExtensionError(
+                f"Prohibited extension {extension_name} is quarantined and cannot be enabled."
+            )
         if extension_name in REQUIRED_EXTENSION_NAMES:
             if enabled is not True:
                 raise ExtensionError(
@@ -319,8 +448,15 @@ class ExtensionService:
 
     set_global_extension_enabled = set_extension_enabled
 
-    def profile_extension_path(self, profile_id, extension_name=AUTOFILL_EXTENSION_NAME):
-        profile_dir = self.profile_service.require_profile_dir(profile_id)
+    def profile_extension_path(
+        self, profile_id, extension_name=AUTOFILL_EXTENSION_NAME, record=None
+    ):
+        try:
+            profile_dir = self.profile_service.require_profile_dir(
+                profile_id, record=record
+            )
+        except TypeError:
+            profile_dir = self.profile_service.require_profile_dir(profile_id)
         extensions_dir = self._profile_extensions_dir(profile_dir)
         return checked_path(
             extensions_dir / extension_name, profile_dir
@@ -334,8 +470,15 @@ class ExtensionService:
         if not extensions_dir.is_dir():
             return []
         paths = []
+        prohibited = {name.casefold() for name in PROHIBITED_EXTENSION_NAMES}
         for target in sorted(extensions_dir.iterdir(), key=lambda item: (item.name.casefold(), item.name)):
             if not target.is_dir() or target.name.startswith("."):
+                continue
+            if target.name.casefold() in prohibited:
+                self.logger.warning(
+                    "Skipping quarantined extension deployment for profile %s",
+                    profile_id,
+                )
                 continue
             try:
                 self._validate_extension_directory(
@@ -360,17 +503,30 @@ class ExtensionService:
         elif path.exists() or path.is_symlink():
             path.unlink()
 
-    def ensure_profile_extension(self, profile_id, extension_name=AUTOFILL_EXTENSION_NAME):
+    def ensure_profile_extension(
+        self, profile_id, extension_name=AUTOFILL_EXTENSION_NAME, *, source=None,
+        validate_source=True,
+    ):
         """Deploy source through a stage while preserving local config/extra files."""
+        if not isinstance(extension_name, str) or not extension_name.strip():
+            raise ExtensionError("Extension name is required.")
+        extension_name = extension_name.strip()
+        if extension_name.casefold() in {
+            name.casefold() for name in PROHIBITED_EXTENSION_NAMES
+        }:
+            raise ExtensionDeploymentError(
+                f"Prohibited extension {extension_name} is quarantined and cannot be deployed."
+            )
         profile_dir = self.profile_service.require_profile_dir(profile_id)
-        source = self.get_source_path(extension_name)
+        source = Path(source) if source is not None else self.get_source_path(extension_name)
         if not source.exists():
             raise ExtensionNotFoundError(f"Extension source not found at {source}")
-        self._validate_extension_directory(
-            source,
-            f"Extension source {extension_name}",
-            require_config=extension_name == AUTOFILL_EXTENSION_NAME,
-        )
+        if validate_source:
+            self._validate_extension_directory(
+                source,
+                f"Extension source {extension_name}",
+                require_config=extension_name == AUTOFILL_EXTENSION_NAME,
+            )
         extensions_dir = self._profile_extensions_dir(profile_dir)
         extensions_dir.mkdir(parents=True, exist_ok=True)
         target = checked_path(extensions_dir / extension_name, profile_dir)
@@ -442,23 +598,43 @@ class ExtensionService:
                 except OSError:
                     self.logger.error("Previous extension deployment could not be restored")
 
-    def ensure_required_extensions(self, profile_id):
+    def prepare_required_extension_sources(self):
+        """Validate immutable built-in sources once for a bounded batch job."""
+        sources = self.discover_sources()
+        prepared = {}
+        for extension_name in REQUIRED_EXTENSION_NAMES:
+            source = sources.get(extension_name)
+            if source is None:
+                raise ExtensionNotFoundError(
+                    f"Required extension source not found at {self.get_source_path(extension_name)}"
+                )
+            self._validate_extension_directory(
+                source,
+                f"Extension source {extension_name}",
+                require_config=extension_name == AUTOFILL_EXTENSION_NAME,
+            )
+            prepared[extension_name] = source
+        return prepared
+
+    def ensure_required_extensions(self, profile_id, source_cache=None):
         """Deploy both product defaults or fail clearly before launching a profile.
 
         Account setup is not a prerequisite. The GUI/launcher calls this at the
         launch boundary, so fresh profiles receive the same built-in registry
         extensions as profiles with account metadata.
         """
-        sources = self.discover_sources()
-        for extension_name in REQUIRED_EXTENSION_NAMES:
-            if extension_name not in sources:
-                raise ExtensionNotFoundError(
-                    f"Required extension source not found at {self.get_source_path(extension_name)}"
-                )
-        return [
-            self.ensure_profile_extension(profile_id, extension_name)
+        sources = source_cache or self.prepare_required_extension_sources()
+        paths = [
+            self.ensure_profile_extension(
+                profile_id,
+                extension_name,
+                source=sources[extension_name],
+                validate_source=False,
+            )
             for extension_name in REQUIRED_EXTENSION_NAMES
         ]
+        self._register_profile_extensions(profile_id, paths)
+        return paths
 
     def ensure_enabled_extensions(self, profile_id):
         """Deploy exactly the extensions enabled by the current global policy."""
@@ -470,17 +646,21 @@ class ExtensionService:
                 )
 
         enabled = {name.casefold() for name in self._policy_enabled_names()}
+        prohibited = {name.casefold() for name in PROHIBITED_EXTENSION_NAMES}
         names = list(REQUIRED_EXTENSION_NAMES)
         names.extend(
             extension_name
             for extension_name in sorted(sources, key=lambda item: (item.casefold(), item))
             if extension_name not in REQUIRED_EXTENSION_NAMES
+            and extension_name.casefold() not in prohibited
             and extension_name.casefold() in enabled
         )
-        return [
+        paths = [
             self.ensure_profile_extension(profile_id, extension_name)
             for extension_name in names
         ]
+        self._register_profile_extensions(profile_id, paths)
+        return paths
 
     def get_enabled_profile_extension_paths(self, profile_id):
         """Return only current-policy deployments, excluding stale disabled ones."""

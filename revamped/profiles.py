@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import time
 import uuid
 
 from . import environment, proxy
@@ -36,6 +37,7 @@ from .processes import ChromiumProcessInspector
 
 
 PROFILE_EXTENSION_DIR_NAME = "Unpacked Extensions"
+MAX_DISPLAYED_PROFILES = 9_999
 
 
 class _NullLogger:
@@ -71,14 +73,82 @@ class ProfileService:
         self._legacy_mirror_enabled = self.legacy_store.path.exists()
         self._unpublished_paths = set()
         self._operation_depth = 0
+        self._batch_catalog = None
+        self._batch_dirty = False
+        self._batch_created_paths = set()
+        self._registry_idle_checked = False
 
     @contextmanager
     def operation(self):
-        with self.legacy_store.operation():
+        # The catalog mutation gate is shared by all ProfileService instances
+        # for this workspace.  Re-entering the service should not acquire the
+        # same Windows byte-range lock again.
+        if self._operation_depth:
             self._operation_depth += 1
             try:
                 yield
             finally:
+                self._operation_depth -= 1
+            return
+        with self.catalog_store.coordinator.mutation():
+            with self.legacy_store.operation():
+                self._operation_depth += 1
+                self._registry_idle_checked = False
+                try:
+                    yield
+                finally:
+                    self._registry_idle_checked = False
+                    self._operation_depth -= 1
+
+    @contextmanager
+    def batch_operation(self):
+        """Hold one manager lock and publish one catalog for a batch.
+
+        Filesystem work remains profile-local, but all catalog reads/writes
+        performed by the nested service methods use one in-memory snapshot.
+        This is intentionally a small transaction boundary for imports and
+        other bounded product jobs; it does not change the normal single-item
+        lifecycle methods.
+        """
+        if self._batch_catalog is not None:
+            yield self._batch_catalog
+            return
+        # Keep the process-wide catalog mutation gate for the entire batch so
+        # manual create/edit/delete operations cannot publish a stale snapshot
+        # while the import is staging profile-local files.  The catalog write
+        # lock itself is acquired only for the final commit below.
+        with self.catalog_store.coordinator.mutation():
+            self._operation_depth += 1
+            self._registry_idle_checked = False
+            try:
+                self._check_registry_idle()
+                catalog = self._load_catalog()
+                self._batch_catalog = catalog
+                self._batch_dirty = False
+                self._batch_created_paths = set()
+                try:
+                    yield catalog
+                    if self._batch_dirty:
+                        self._batch_catalog = None
+                        self._batch_dirty = False
+                        # The legacy mirror is optional, but when enabled its
+                        # short publication is still kept under its own lock.
+                        with self.legacy_store.operation():
+                            self._save_catalog(catalog)
+                except Exception:
+                    # A catalog publication failure must not make a newly-created
+                    # directory look like a published profile on the next start.
+                    # Preserve the directory for explicit recovery rather than
+                    # deleting user data automatically.
+                    for path in self._batch_created_paths:
+                        if Path(path).exists():
+                            self._unpublished_paths.add(Path(path).absolute())
+                    raise
+            finally:
+                self._batch_catalog = None
+                self._batch_dirty = False
+                self._batch_created_paths = set()
+                self._registry_idle_checked = False
                 self._operation_depth -= 1
 
     @staticmethod
@@ -86,7 +156,7 @@ class ProfileService:
         return empty_catalog()
 
     def _record(self, profile_id, display_name, profile_path, created_at=None, last_opened_at=None):
-        return new_profile_record(
+        record = new_profile_record(
             profile_id,
             display_name,
             profile_path,
@@ -95,6 +165,11 @@ class ProfileService:
             last_opened_at=last_opened_at,
             clock=self.clock,
         ).to_mapping()
+        record["updated_at"] = record["created_at"]
+        return record
+
+    def _touch(self, record):
+        record["updated_at"] = utc_timestamp(self.clock)
 
     @staticmethod
     def _record_map(data):
@@ -156,13 +231,9 @@ class ProfileService:
                     raise
                 self.logger.warning("Legacy compatibility state could not be read; using physical profiles")
                 return self.legacy_store._create_default()
-        if not managed_paths and not legacy_paths:
-            state = self.legacy_store.load()
-        else:
-            state = self.legacy_store._create_default()
-        self.legacy_store.save(state)
-        self._legacy_mirror_enabled = True
-        return state
+        # Catalog reads must not initialize or repair the legacy mirror.  The
+        # explicit startup schema operation performs that write when needed.
+        return self.legacy_store.load() if not managed_paths and not legacy_paths else self.legacy_store._create_default()
 
     def _bootstrap_catalog(self):
         managed_paths = self._scan_profile_root(self.paths.profiles_dir)
@@ -189,8 +260,6 @@ class ProfileService:
             catalog["profiles"].append(self._record(profile_id, profile_id, path))
             known_ids.add(folded_id)
             known_directories.add(directory_key)
-        self.catalog_store.save(catalog)
-        self._legacy_mirror_enabled = True
         return catalog
 
     def _reconcile_managed_profiles(self, catalog):
@@ -240,19 +309,35 @@ class ProfileService:
         return changed
 
     def _load_catalog(self):
+        """Read and validate catalog state without any write-back."""
+        if self._batch_catalog is not None:
+            return self._batch_catalog
         catalog = self.catalog_store.load()
         if catalog is None:
             return self._bootstrap_catalog()
-        changed = self._reconcile_legacy_profiles(catalog)
-        changed = self._reconcile_managed_profiles(catalog) or changed
-        if changed:
-            self._save_catalog(catalog)
+        # Existing catalogs are returned exactly as read. Migration,
+        # reconciliation, and normalization belong to ensure_catalog_schema().
         return catalog
 
     def initialize_metadata(self):
+        return self.ensure_catalog_schema()
+
+    def ensure_catalog_schema(self):
+        """Explicitly bootstrap/reconcile and publish application metadata."""
         with self.operation():
             self._check_registry_idle()
-            self._load_catalog()
+            catalog = self._load_catalog()
+            # Legacy reconciliation is a controlled startup/migration action;
+            # status/list reads must not touch the legacy registry.
+            self._reconcile_legacy_profiles(catalog)
+            self._reconcile_managed_profiles(catalog)
+            if not self.legacy_store.path.exists():
+                # Preserve the legacy compatibility contract, but keep this
+                # migration write at the controlled startup boundary.
+                self.legacy_store.save(self.legacy_store.load())
+                self._legacy_mirror_enabled = True
+            self._save_catalog(catalog)
+            return catalog
 
     def get_profile_metadata(self):
         return [dict(record) for record in self._load_catalog()["profiles"]]
@@ -264,13 +349,78 @@ class ProfileService:
             raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
         return dict(record)
 
+    def get_account_metadata(self, profile_id, record=None):
+        """Return the safe account association stored with one profile."""
+        if record is None:
+            record = self.get_profile_record(profile_id)
+        account = record.get("account")
+        return dict(account) if isinstance(account, dict) else None
+
+    def set_account_metadata(self, profile_id, metadata=None):
+        """Atomically set or remove one profile's safe account association."""
+        profile_id = validate_profile_id(profile_id)
+        if metadata is not None:
+            if not isinstance(metadata, dict):
+                raise ProfileManagerError("Account metadata must be an object.")
+            mode = metadata.get("mode")
+            allowed = (
+                {"mode", "email"}
+                if mode == "development"
+                else {"mode", "label", "email"}
+            )
+            if any(not isinstance(key, str) or key not in allowed for key in metadata):
+                raise ProfileManagerError(
+                    "Only product account mode, label, and email identifier metadata are supported."
+                )
+            if mode not in {"product", "development"}:
+                raise ProfileManagerError(
+                    "Only product or synthetic development account metadata may be persisted."
+                )
+            if not isinstance(metadata.get("email"), str) or not metadata["email"].strip():
+                raise ProfileManagerError("An account email identifier is required.")
+            if "label" in metadata and not isinstance(metadata["label"], str):
+                raise ProfileManagerError("A product account label must be text.")
+            if mode == "development" and not metadata["email"].casefold().endswith(
+                "@example.invalid"
+            ):
+                raise ProfileManagerError(
+                    "Synthetic development account identifiers must end in @example.invalid."
+                )
+            if mode == "product" and ":" in metadata["email"]:
+                raise ProfileManagerError(
+                    "Product account identifiers cannot contain credential separators."
+                )
+            try:
+                self.catalog_store._validate_field_names({"account": metadata})
+            except ValueError as error:
+                raise ProfileManagerError(
+                    "Sensitive account metadata cannot be stored in the profile catalog."
+                ) from error
+
+        with self.operation():
+            self._check_registry_idle()
+            self.require_profile_dir(profile_id)
+            catalog = self._load_catalog()
+            record = self._record_map(catalog).get(profile_id)
+            if record is None:
+                raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+            if metadata is None:
+                record.pop("account", None)
+            else:
+                record["account"] = dict(metadata)
+            self._touch(record)
+            self._save_catalog(catalog)
+        return self.get_account_metadata(profile_id)
+
     def get_environment(self, profile_id):
         record = self.get_profile_record(profile_id)
         preset, config = environment.effective_environment(record)
         return {"preset": preset, "environment_preset": preset, **dict(config)}
 
     @staticmethod
-    def _normalized_proxy_settings(enabled, scheme=None, host=None, port=None):
+    def _normalized_proxy_settings(
+        enabled, scheme=None, host=None, port=None, username=None, password=None
+    ):
         """Validate one unauthenticated proxy independently of persistence."""
         if enabled is not True and enabled is not False:
             raise proxy.ProxyValidationError("Proxy state must be Enabled or Off.")
@@ -289,14 +439,18 @@ class ProfileService:
             raise proxy.ProxyValidationError("Proxy port must be a number from 1 to 65535.")
         if normalized is None:
             raise proxy.ProxyValidationError("Proxy configuration is incomplete or invalid.")
-        return {"enabled": True, **normalized}
+        credentials = proxy.normalize_proxy_credentials(username, password)
+        return {"enabled": True, **normalized, **credentials}
 
     @staticmethod
     def _apply_proxy_settings(record, normalized):
         """Write an already-validated proxy state into one catalog record."""
         if not normalized["enabled"]:
             record["proxy_enabled"] = False
-            for field in ("proxy_scheme", "proxy_host", "proxy_port"):
+            for field in (
+                "proxy_scheme", "proxy_host", "proxy_port",
+                "proxy_username", "proxy_password",
+            ):
                 record.pop(field, None)
             return
         record["proxy_enabled"] = True
@@ -305,6 +459,12 @@ class ProfileService:
             "proxy_host": normalized["host"],
             "proxy_port": normalized["port"],
         })
+        if normalized.get("username") is not None:
+            record["proxy_username"] = normalized["username"]
+            record["proxy_password"] = normalized["password"]
+        else:
+            record.pop("proxy_username", None)
+            record.pop("proxy_password", None)
 
     @staticmethod
     def _apply_environment_settings(
@@ -335,6 +495,7 @@ class ProfileService:
             if record is None:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
             self._apply_environment_settings(record, profile_id, preset, config)
+            self._touch(record)
             self._save_catalog(catalog)
         return self.get_environment(profile_id)
 
@@ -343,9 +504,14 @@ class ProfileService:
     def get_proxy(self, profile_id):
         return dict(proxy.effective_proxy(self.get_profile_record(profile_id)))
 
-    def set_proxy(self, profile_id, enabled, scheme=None, host=None, port=None):
+    def set_proxy(
+        self, profile_id, enabled, scheme=None, host=None, port=None,
+        username=None, password=None
+    ):
         profile_id = validate_profile_id(profile_id)
-        normalized = self._normalized_proxy_settings(enabled, scheme, host, port)
+        normalized = self._normalized_proxy_settings(
+            enabled, scheme, host, port, username, password
+        )
         with self.operation():
             self._check_registry_idle()
             self.require_profile_dir(profile_id)
@@ -354,6 +520,7 @@ class ProfileService:
             if record is None:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
             self._apply_proxy_settings(record, normalized)
+            self._touch(record)
             self._save_catalog(catalog)
         return self.get_proxy(profile_id)
 
@@ -371,7 +538,6 @@ class ProfileService:
             "environment_preset": state["preset"],
             "user_agent": source.get("user_agent", ""),
             "language": source.get("language", ""),
-            "device_scale_factor": source.get("device_scale_factor"),
             "touch_mode": bool(source.get("touch_mode", False)),
             "mobile_mode": bool(source.get("mobile_mode", False)),
             "timezone": source.get("timezone", ""),
@@ -385,6 +551,25 @@ class ProfileService:
             "viewport_height": effective.get("viewport_height"),
             "timezone_runtime_applied": False,
         }
+        if source.get("environment_schema") != environment.PRODUCT_ENVIRONMENT_SCHEMA:
+            # Legacy/refactor callers retain their historical read contract;
+            # product records never expose this obsolete editable field.
+            environment_state["device_scale_factor"] = source.get("device_scale_factor")
+        if source.get("environment_schema") == environment.PRODUCT_ENVIRONMENT_SCHEMA:
+            details = environment.product_environment_details(record)
+            environment_state.update({
+                "generated_family": details.get("generated_family"),
+                "generated_revision": details.get("generated_revision"),
+                "environment_seed": details.get("environment_seed"),
+                "environment_signature": details.get("signature"),
+                "language_order": details.get("language_order", []),
+                "region": details.get("region"),
+                "windows_timezone_key": details.get("windows_timezone_key"),
+                "window_width": details["window_geometry"]["width"],
+                "window_height": details["window_geometry"]["height"],
+                "field_sources": details.get("field_sources", {}),
+                "runtime_version": details.get("runtime_version"),
+            })
         network = dict(proxy.effective_proxy(record))
         return {
             "environment": environment_state,
@@ -425,12 +610,6 @@ class ProfileService:
         )
         if proxy_config is not None and not isinstance(proxy_config, dict):
             raise proxy.ProxyValidationError("Proxy settings must be an object.")
-        if isinstance(proxy_config, dict) and any(
-            key in proxy_config for key in ("username", "password", "credentials")
-        ):
-            raise proxy.ProxyValidationError(
-                "Authenticated proxy launch and storage are not supported."
-            )
         with self.operation():
             self._check_registry_idle()
             self.require_profile_dir(profile_id)
@@ -455,6 +634,8 @@ class ProfileService:
                     proxy_config.get("scheme"),
                     proxy_config.get("host"),
                     proxy_config.get("port"),
+                    proxy_config.get("username", record.get("proxy_username")),
+                    proxy_config.get("password", record.get("proxy_password")),
                 )
 
             record["environment_preset"] = normalized_preset
@@ -462,6 +643,7 @@ class ProfileService:
             if materialized is not None:
                 record["environment_config"] = materialized
             self._apply_proxy_settings(record, normalized_proxy)
+            self._touch(record)
             self._save_catalog(catalog)
         return self.get_runtime_settings(profile_id)
 
@@ -502,6 +684,9 @@ class ProfileService:
         return info
 
     def _save_catalog(self, catalog):
+        if self._batch_catalog is catalog:
+            self._batch_dirty = True
+            return
         coordinator = MirrorCoordinator(
             self.catalog_store, self.legacy_store, self._legacy_mirror_enabled, self.logger
         )
@@ -509,9 +694,12 @@ class ProfileService:
         self._legacy_mirror_enabled = coordinator.enabled
 
     def _check_registry_idle(self):
+        if self._registry_idle_checked:
+            return
         for root, label in ((self.paths.data_dir, "data"), (self.paths.profiles_dir, "managed")):
             if self.process_inspector.using_directory(root, exact=True):
                 raise ProfileManagerError(f"Chromium is using the shared {label} data directory. Close it before using the manager.")
+        self._registry_idle_checked = True
 
     def get_profiles(self):
         return profile_pairs(self._load_catalog()["profiles"])
@@ -553,12 +741,16 @@ class ProfileService:
             return legacy_path
         return checked_path(self.paths.profiles_dir / profile_id, self.paths.profiles_dir)
 
-    def get_profile_dir(self, profile_id):
+    def get_profile_dir(self, profile_id, record=None):
         profile_id = validate_profile_id(profile_id)
-        catalog = self.catalog_store.load()
-        if catalog is None and not self.legacy_store.path.exists() and not self.paths.data_dir.exists() and not self.paths.profiles_dir.exists():
-            return self._resolve_profile_dir(profile_id)
-        record = self._record_map(self._load_catalog()).get(profile_id)
+        if record is None:
+            if self._batch_catalog is not None:
+                record = self._record_map(self._batch_catalog).get(profile_id)
+            else:
+                catalog = self.catalog_store.load()
+                if catalog is None and not self.legacy_store.path.exists() and not self.paths.data_dir.exists() and not self.paths.profiles_dir.exists():
+                    return self._resolve_profile_dir(profile_id)
+                record = self._record_map(self._load_catalog()).get(profile_id)
         return self._resolve_profile_dir(profile_id, record) if record is not None else self._resolve_profile_dir(profile_id)
 
     def _check_pending_delete(self, profile_id, parent=None):
@@ -570,11 +762,15 @@ class ProfileService:
                 if path.name.startswith(f".deleting-{profile_id}-"):
                     raise ProfileManagerError(f"An interrupted deletion left data at {path}. Restore or inspect that directory before continuing.")
 
-    def require_profile_dir(self, profile_id):
+    def require_profile_dir(self, profile_id, record=None):
         profile_id = validate_profile_id(profile_id)
-        if (self.catalog_store.load() is None and not self.legacy_store.path.exists() and not self.paths.data_dir.exists() and not self.paths.profiles_dir.exists()):
-            raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
-        record = self._record_map(self._load_catalog()).get(profile_id)
+        if record is None:
+            if self._batch_catalog is not None:
+                record = self._record_map(self._batch_catalog).get(profile_id)
+            else:
+                if (self.catalog_store.load() is None and not self.legacy_store.path.exists() and not self.paths.data_dir.exists() and not self.paths.profiles_dir.exists()):
+                    raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+                record = self._record_map(self._load_catalog()).get(profile_id)
         if record is None:
             raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
         path = self._resolve_profile_dir(profile_id, record)
@@ -603,16 +799,132 @@ class ProfileService:
         with self.operation():
             self._check_registry_idle()
             catalog = self._load_catalog()
+            if len(catalog["profiles"]) >= MAX_DISPLAYED_PROFILES:
+                raise ProfileManagerError(
+                    f"The manager supports a maximum of {MAX_DISPLAYED_PROFILES:,} profiles."
+                )
             new_id = self.next_profile_id(self._record_map(catalog))
             self._initialize_profile_structure(new_id)
             profile_dir = self._resolve_profile_dir(new_id)
             catalog["profiles"].append(self._record(new_id, display_name.strip() if display_name is not None else new_id, profile_dir))
+            if self._batch_catalog is catalog:
+                self._batch_created_paths.add(profile_dir.absolute())
             try:
                 self._save_catalog(catalog)
             except Exception:
                 self._unpublished_paths.add(profile_dir.absolute())
                 raise
             return new_id
+
+    @staticmethod
+    def _retry_filesystem(operation, *, attempts=3, delay=0.05):
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return operation()
+            except OSError as error:
+                last_error = error
+                if attempt + 1 < attempts:
+                    time.sleep(delay * (attempt + 1))
+        raise last_error
+
+    def delete_profiles(self, profile_ids, close_callback=None):
+        """Delete many stable profile IDs under one catalog operation.
+
+        Each item is isolated from the next: a missing path, close failure, or
+        transient filesystem error becomes that item's result while remaining
+        IDs continue.  The catalog is published once after all staging moves.
+        """
+        if not isinstance(profile_ids, (list, tuple, set)):
+            profile_ids = [profile_ids]
+        normalized_ids = []
+        seen = set()
+        for value in profile_ids:
+            if not value:
+                continue
+            profile_id = str(value)
+            if profile_id.casefold() in seen:
+                continue
+            seen.add(profile_id.casefold())
+            normalized_ids.append(profile_id)
+
+        results = []
+        pending = []
+        with self.operation():
+            self._check_registry_idle()
+            catalog = self._load_catalog()
+            records = self._record_map(catalog)
+            changed = False
+            for profile_id in normalized_ids:
+                item = {"profile_id": profile_id, "status": "failed"}
+                try:
+                    validate_profile_id(profile_id)
+                    record = records.get(profile_id)
+                    if record is None:
+                        raise ProfileNotFoundError(f"Profile {profile_id} not found")
+                    profile_dir = self._resolve_profile_dir(profile_id, record)
+                    if self.process_inspector.using_directory(profile_dir):
+                        if callable(close_callback):
+                            close_callback(profile_id)
+                        if self.process_inspector.using_directory(profile_dir):
+                            raise ProfileManagerError(
+                                f"Close Chromium for {profile_id} before deleting it."
+                            )
+                    staged = None
+                    if profile_dir.exists():
+                        if not profile_dir.is_dir():
+                            raise ProfileManagerError(
+                                f"Profile path is not a directory: {profile_dir}"
+                            )
+                        staged = checked_path(
+                            profile_dir.parent / f".deleting-{profile_id}-{uuid.uuid4().hex}",
+                            profile_dir.parent,
+                        )
+                        self._retry_filesystem(lambda: profile_dir.rename(staged))
+                    else:
+                        self._check_pending_delete(profile_id, profile_dir.parent)
+                    catalog["profiles"] = [
+                        value for value in catalog["profiles"]
+                        if value["profile_id"] != profile_id
+                    ]
+                    records.pop(profile_id, None)
+                    changed = True
+                    pending.append((profile_id, staged))
+                    item["status"] = "deleted"
+                    item["error"] = None
+                except Exception as error:
+                    item["error"] = str(error)[:240] or error.__class__.__name__
+                results.append(item)
+
+            if changed:
+                self._save_catalog(catalog)
+                for profile_id, staged in pending:
+                    if staged is None:
+                        continue
+                    try:
+                        checked_path(staged, staged.parent)
+                        self._retry_filesystem(lambda path=staged: shutil.rmtree(path))
+                    except OSError as error:
+                        # Metadata is already published, so retain an explicit
+                        # failure result and leave the staging directory for
+                        # manual recovery rather than retrying indefinitely.
+                        for item in results:
+                            if item["profile_id"] == profile_id:
+                                item["status"] = "failed"
+                                item["error"] = (
+                                    f"Profile metadata was removed, but profile data could not "
+                                    f"be cleaned up: {error}"
+                                )[:240]
+                                break
+
+        deleted = sum(item["status"] == "deleted" for item in results)
+        failed = len(results) - deleted
+        return {
+            "results": results,
+            "requested": len(normalized_ids),
+            "deleted": deleted,
+            "failed": failed,
+        }
 
     def rename_profile(self, profile_id, new_name):
         if not isinstance(new_name, str) or not new_name.strip():
@@ -625,6 +937,7 @@ class ProfileService:
             if record is None:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
             record["display_name"] = new_name.strip()
+            self._touch(record)
             self._save_catalog(catalog)
 
     def delete_profile(self, profile_id):
@@ -670,6 +983,10 @@ class ProfileService:
             record = self._record_map(catalog).get(profile_id)
             if record is None:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+            if len(catalog["profiles"]) >= MAX_DISPLAYED_PROFILES:
+                raise ProfileManagerError(
+                    f"The manager supports a maximum of {MAX_DISPLAYED_PROFILES:,} profiles."
+                )
             current_path = self._resolve_profile_dir(profile_id, record)
             if current_path.absolute().is_relative_to(self.paths.profiles_dir.absolute()):
                 if not current_path.is_dir():
@@ -712,6 +1029,7 @@ class ProfileService:
             if record is None:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
             record["last_opened_at"] = utc_timestamp(self.clock)
+            self._touch(record)
             self._save_catalog(catalog)
             return
         with self.operation():
@@ -721,6 +1039,7 @@ class ProfileService:
             if record is None:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
             record["last_opened_at"] = utc_timestamp(self.clock)
+            self._touch(record)
             self._save_catalog(catalog)
 
     def get_browser_profile_dir(self, profile_id):

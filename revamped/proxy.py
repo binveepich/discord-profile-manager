@@ -63,7 +63,35 @@ def normalize_proxy_port(value):
 
 
 def _proxy_off_state():
-    return {"enabled": False, "scheme": None, "host": None, "port": None}
+    return {
+        "enabled": False,
+        "scheme": None,
+        "host": None,
+        "port": None,
+    }
+
+
+def _normalize_proxy_credential(value, field):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > 320:
+        raise ProxyValidationError(f"Proxy {field} must be non-empty text.")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ProxyValidationError(f"Proxy {field} contains invalid characters.")
+    return value
+
+
+def normalize_proxy_credentials(username=None, password=None):
+    """Validate optional credentials for explicit user-owned export/storage."""
+    if username is None and password is None:
+        return {"username": None, "password": None}
+    username = _normalize_proxy_credential(username, "username")
+    password = _normalize_proxy_credential(password, "password")
+    if (username is None) != (password is None):
+        raise ProxyValidationError(
+            "Proxy username and password must be provided together."
+        )
+    return {"username": username, "password": password}
 
 
 def normalize_proxy_config(scheme, host, port):
@@ -83,7 +111,14 @@ def effective_proxy(record):
     normalized = normalize_proxy_config(
         record.get("proxy_scheme"), record.get("proxy_host"), record.get("proxy_port")
     )
-    return {"enabled": True, **normalized} if normalized is not None else _proxy_off_state()
+    if normalized is None:
+        return _proxy_off_state()
+    result = {"enabled": True, **normalized}
+    for field in ("username", "password"):
+        value = record.get(f"proxy_{field}")
+        if isinstance(value, str) and value:
+            result[field] = value
+    return result
 
 
 def proxy_launch_arguments(record):

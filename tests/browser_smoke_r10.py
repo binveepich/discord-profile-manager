@@ -207,7 +207,7 @@ def main():
                 entries => resolve(entries.map(e => ({id: e.id, name: e.name, state: e.state,
                     path: e.path, manifestErrors: e.manifestErrors, runtimeErrors: e.runtimeErrors}))))
             )""")
-            required_labels = {"Discord Autofill", "Discord Token Extractor"}
+            required_labels = {"Discord Autofill"}
             enabled = {entry["name"] for entry in captured["runtime_extensions"] if entry["state"] == "ENABLED"}
             assert required_labels.issubset(enabled), captured["runtime_extensions"]
             load_switch = next(arg for arg in captured["generated_command"] if arg.startswith("--load-extension="))

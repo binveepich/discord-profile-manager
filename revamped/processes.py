@@ -37,7 +37,32 @@ class ChromiumProcessInspector:
         self.process_iter = process_iter or psutil_module.process_iter
 
     def using_directory(self, directory, exact=False):
-        directory = Path(directory).resolve()
+        return bool(self.using_directories([directory], exact=exact))
+
+    def using_directories(self, directories, exact=False):
+        """Return the requested Chromium roots currently in use.
+
+        A profile table may contain hundreds of rows.  Walking the process
+        list once per row is both redundant and, on Windows, surprisingly
+        expensive because command lines may require parent-process fallback.
+        Keep the single-directory API for existing callers and provide one
+        shared process walk for read-only status refreshes.
+        """
+        targets = {}
+        for directory in directories:
+            resolved = Path(directory).resolve()
+            targets[resolved] = resolved
+        if not targets:
+            return set()
+        targets_by_ancestor = {}
+        for target in targets:
+            ancestor = target
+            while True:
+                targets_by_ancestor.setdefault(ancestor, set()).add(target)
+                if ancestor.parent == ancestor:
+                    break
+                ancestor = ancestor.parent
+        found = set()
         try:
             processes = self.process_iter(["name"])
             for process in processes:
@@ -60,11 +85,20 @@ class ChromiumProcessInspector:
                     value = _argument_user_data_dir(args)
                     if value:
                         candidate = _candidate_directory(value, owner)
-                        if candidate == directory or (
-                            not exact
-                            and (directory.is_relative_to(candidate) or candidate.is_relative_to(directory))
-                        ):
-                            return True
+                        if exact:
+                            if candidate in targets:
+                                found.add(candidate)
+                            continue
+                        # Candidate is a shared ancestor of one or more
+                        # requested roots, or a requested root is an ancestor
+                        # of the candidate.  Both checks are path-indexed and
+                        # avoid comparing every process with every profile.
+                        found.update(targets_by_ancestor.get(candidate, ()))
+                        ancestor = candidate
+                        while ancestor != ancestor.parent:
+                            if ancestor in targets:
+                                found.add(ancestor)
+                            ancestor = ancestor.parent
                 except self.psutil.NoSuchProcess:
                     continue
                 except (self.psutil.AccessDenied, OSError) as error:
@@ -77,7 +111,6 @@ class ChromiumProcessInspector:
             raise ProfileManagerError(
                 "Cannot check running Chromium processes. Retry after closing Chromium."
             ) from error
-        return False
+        return found
 
     __call__ = using_directory
-

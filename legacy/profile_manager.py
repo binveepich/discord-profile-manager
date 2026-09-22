@@ -43,6 +43,11 @@ PROFILES_DIR = PROJECT_ROOT / "profiles"
 LOG_DIR = BASE_DIR / "log"
 EXTENSIONS_DIR = PROJECT_ROOT / "extensions"
 AUTOFILL_EXTENSION_NAME = "discord-autofill-extension"
+TOKEN_EXTRACTOR_EXTENSION_NAME = "discord-token-extractor-extension"
+# Retain the name for quarantine checks and legacy inspection, but do not make
+# the token-extractor source a required or automatically deployed extension.
+PROHIBITED_EXTENSION_NAMES = (TOKEN_EXTRACTOR_EXTENSION_NAME,)
+REQUIRED_EXTENSION_NAMES = (AUTOFILL_EXTENSION_NAME,)
 EXT_DIR = EXTENSIONS_DIR / AUTOFILL_EXTENSION_NAME
 PROFILE_EXTENSIONS_DIR_NAME = "Unpacked Extensions"
 LOCAL_STATE = DATA_DIR / "Local State"
@@ -116,7 +121,7 @@ class ExtensionError(ProfileManagerError):
     pass
 
 class ExtensionNotFoundError(ExtensionError):
-    """Discord autofill extension source is not available."""
+    """A required application-owned extension source is not available."""
     pass
 
 class ExtensionDeploymentError(ExtensionError):
@@ -1774,16 +1779,21 @@ class ProfileManager:
 # Extension and Account Management
 # ----------------------------------------------------------------------
 class ExtensionManager:
-    """Discover and safely deploy the supported unpacked extension."""
+    """Discover and safely deploy application-owned unpacked extensions."""
 
     def __init__(self, profile_manager):
         self.profile_manager = profile_manager
 
     @staticmethod
     def _source_root():
-        # Derive the root from EXT_DIR so tests and portable copies can replace
-        # the source location without introducing an absolute path dependency.
-        return Path(EXT_DIR).parent
+        # Keep EXTENSIONS_DIR as the application registry. The EXT_DIR fallback
+        # preserves the legacy test/portable injection seam when only that old
+        # single-extension path is replaced.
+        registry = Path(EXTENSIONS_DIR)
+        injected_root = Path(EXT_DIR).parent
+        if registry == PROJECT_ROOT / "extensions" and injected_root != registry:
+            return injected_root
+        return registry
 
     @staticmethod
     def _profile_extensions_dir(profile_dir):
@@ -1806,7 +1816,7 @@ class ExtensionManager:
         return candidate
 
     @classmethod
-    def _validate_extension_directory(cls, extension_dir, description):
+    def _validate_extension_directory(cls, extension_dir, description, *, require_config=False):
         extension_dir = Path(extension_dir)
         if not extension_dir.is_dir():
             raise ExtensionError(f"{description} is not a directory.")
@@ -1816,10 +1826,9 @@ class ExtensionManager:
             raise ExtensionError(f"{description} contains an unsupported linked path.") from error
 
         manifest_file = extension_dir / 'manifest.json'
-        config_file = extension_dir / 'config.js'
         if not manifest_file.is_file():
             raise ExtensionError(f"{description} is incomplete: manifest.json is missing.")
-        if not config_file.is_file():
+        if require_config and not (extension_dir / 'config.js').is_file():
             raise ExtensionError(f"{description} is incomplete: config.js is missing.")
 
         try:
@@ -1827,7 +1836,7 @@ class ExtensionManager:
         except (OSError, UnicodeError, ValueError) as error:
             raise ExtensionError(f"{description} has an unreadable manifest.json.") from error
 
-        if not isinstance(manifest, dict) or manifest.get('manifest_version') != 3:
+        if not isinstance(manifest, dict) or manifest.get('manifest_version') not in (2, 3):
             raise ExtensionError(f"{description} has an unsupported manifest.json.")
 
         content_scripts = manifest.get('content_scripts', [])
@@ -1842,62 +1851,120 @@ class ExtensionManager:
             for relative_name in scripts:
                 cls._declared_file(extension_dir, relative_name, description)
 
+        background = manifest.get('background')
+        if isinstance(background, dict):
+            service_worker = background.get('service_worker')
+            if service_worker is not None:
+                cls._declared_file(extension_dir, service_worker, description)
+            background_scripts = background.get('scripts', [])
+            if not isinstance(background_scripts, list):
+                raise ExtensionError(f"{description} has an invalid background script list.")
+            for relative_name in background_scripts:
+                cls._declared_file(extension_dir, relative_name, description)
+
         icons = manifest.get('icons', {})
         if icons is not None:
             if not isinstance(icons, dict):
                 raise ExtensionError(f"{description} has an invalid icons section.")
             for relative_name in icons.values():
                 cls._declared_file(extension_dir, relative_name, description)
+
+        action = manifest.get('action', manifest.get('browser_action'))
+        if isinstance(action, dict):
+            action_icons = action.get('default_icon', {})
+            if isinstance(action_icons, str):
+                action_icons = {'default': action_icons}
+            if action_icons is not None:
+                if not isinstance(action_icons, dict):
+                    raise ExtensionError(f"{description} has an invalid action icon section.")
+                for relative_name in action_icons.values():
+                    cls._declared_file(extension_dir, relative_name, description)
         return manifest
 
-    def get_source_path(self):
-        return Path(EXT_DIR)
+    def get_source_path(self, extension_name=AUTOFILL_EXTENSION_NAME):
+        return checked_path(
+            self._source_root() / extension_name,
+            self._source_root(),
+        )
 
     def discover_sources(self):
-        """Return valid supported extension sources under the project root."""
-        source = self.get_source_path()
-        if not source.exists():
+        """Return valid application-owned extension sources in registry order."""
+        registry = self._source_root()
+        if not registry.exists():
             return {}
-        checked_path(source, self._source_root())
-        self._validate_extension_directory(source, 'Autofill extension source')
-        return {AUTOFILL_EXTENSION_NAME: source}
+        if not registry.is_dir():
+            raise ExtensionError(f"Extension registry is not a directory: {registry}")
+
+        discovered = {}
+        for source in sorted(registry.iterdir(), key=lambda item: (item.name.casefold(), item.name)):
+            if not source.is_dir():
+                continue
+            if source.name.casefold() in {
+                name.casefold() for name in PROHIBITED_EXTENSION_NAMES
+            }:
+                logger.warning("Quarantining prohibited extension source %s", source.name)
+                continue
+            if not (source / 'manifest.json').is_file():
+                logger.warning("Ignoring extension directory without manifest: %s", source.name)
+                continue
+            try:
+                self._validate_extension_directory(
+                    source,
+                    f"Extension source {source.name}",
+                )
+            except ExtensionError:
+                if source.name == AUTOFILL_EXTENSION_NAME:
+                    raise
+                logger.warning("Ignoring invalid extension source %s", source.name)
+                continue
+            discovered[source.name] = source
+        return discovered
 
     # Short alias for callers that use discovery as a verb.
     discover = discover_sources
 
-    def profile_extension_path(self, profile_id):
+    def profile_extension_path(self, profile_id, extension_name=AUTOFILL_EXTENSION_NAME):
         profile_dir = self.profile_manager.require_profile_dir(profile_id)
         extensions_dir = self._profile_extensions_dir(profile_dir)
         return checked_path(
-            extensions_dir / AUTOFILL_EXTENSION_NAME,
+            extensions_dir / extension_name,
             profile_dir,
         )
 
     def get_profile_extension_paths(self, profile_id):
-        """Return a valid existing deployment, or no optional extension."""
+        """Return all valid existing profile-local extension deployments."""
         # Keep launch error ordering compatible with M1: the launcher reports a
         # missing browser runtime before an unknown profile. This helper only
         # inspects an already-resolved directory and never creates one.
         profile_dir = self.profile_manager.get_profile_dir(profile_id)
         if not profile_dir.is_dir():
             return []
-        target = checked_path(
-            self._profile_extensions_dir(profile_dir) / AUTOFILL_EXTENSION_NAME,
-            profile_dir,
-        )
-        if not target.exists():
+        extensions_dir = self._profile_extensions_dir(profile_dir)
+        if not extensions_dir.is_dir():
             return []
-        try:
-            self._validate_extension_directory(
-                target,
-                f"Profile {profile_id} extension deployment",
-            )
-        except ExtensionError as error:
-            # An optional extension must never prevent the browser profile from
-            # opening. The account data remains in the profile and is not changed.
-            logger.warning("Skipping invalid optional extension deployment for profile %s: %s", profile_id, error)
-            return []
-        return [target]
+        paths = []
+        prohibited = {name.casefold() for name in PROHIBITED_EXTENSION_NAMES}
+        for target in sorted(extensions_dir.iterdir(), key=lambda item: (item.name.casefold(), item.name)):
+            if not target.is_dir() or target.name.startswith('.'):
+                continue
+            if target.name.casefold() in prohibited:
+                logger.warning(
+                    "Skipping quarantined extension deployment for profile %s",
+                    profile_id,
+                )
+                continue
+            try:
+                self._validate_extension_directory(
+                    target,
+                    f"Profile {profile_id} extension deployment {target.name}",
+                )
+            except ExtensionError as error:
+                # An invalid optional extension must not prevent other valid
+                # application-owned extensions from loading.
+                logger.warning("Skipping invalid optional extension deployment for profile %s: %s", profile_id, target.name)
+                continue
+            paths.append(target)
+        return paths
 
     @staticmethod
     def _remove_path(path):
@@ -1907,17 +1974,30 @@ class ExtensionManager:
         elif path.exists() or path.is_symlink():
             path.unlink()
 
-    def ensure_profile_extension(self, profile_id):
+    def ensure_profile_extension(self, profile_id, extension_name=AUTOFILL_EXTENSION_NAME):
         """Deploy current reusable source while preserving profile config.js."""
+        if not isinstance(extension_name, str) or not extension_name.strip():
+            raise ExtensionError("Extension name is required.")
+        extension_name = extension_name.strip()
+        if extension_name.casefold() in {
+            name.casefold() for name in PROHIBITED_EXTENSION_NAMES
+        }:
+            raise ExtensionDeploymentError(
+                f"Prohibited extension {extension_name} is quarantined and cannot be deployed."
+            )
         profile_dir = self.profile_manager.require_profile_dir(profile_id)
-        source = self.get_source_path()
+        source = self.get_source_path(extension_name)
         if not source.exists():
-            raise ExtensionNotFoundError(f"Autofill extension source not found at {source}")
-        self._validate_extension_directory(source, 'Autofill extension source')
+            raise ExtensionNotFoundError(f"Extension source not found at {source}")
+        self._validate_extension_directory(
+            source,
+            f"Extension source {extension_name}",
+            require_config=extension_name == AUTOFILL_EXTENSION_NAME,
+        )
 
         extensions_dir = self._profile_extensions_dir(profile_dir)
         extensions_dir.mkdir(parents=True, exist_ok=True)
-        target = checked_path(extensions_dir / AUTOFILL_EXTENSION_NAME, profile_dir)
+        target = checked_path(extensions_dir / extension_name, profile_dir)
         if target.exists() and not target.is_dir():
             raise ExtensionDeploymentError(
                 f"Profile {profile_id} extension deployment is not a directory."
@@ -1930,18 +2010,18 @@ class ExtensionManager:
                 existing_config = (target / 'config.js').read_bytes()
 
         staging = checked_path(
-            extensions_dir / f".{AUTOFILL_EXTENSION_NAME}.staging-{uuid.uuid4().hex}",
+            extensions_dir / f".{extension_name}.staging-{uuid.uuid4().hex}",
             profile_dir,
         )
         backup = checked_path(
-            extensions_dir / f".{AUTOFILL_EXTENSION_NAME}.backup-{uuid.uuid4().hex}",
+            extensions_dir / f".{extension_name}.backup-{uuid.uuid4().hex}",
             profile_dir,
         )
         moved_to_backup = False
         try:
             shutil.copytree(source, staging)
-            staged_config = checked_path(staging / 'config.js', staging)
             if existing_config is not None:
+                staged_config = checked_path(staging / 'config.js', staging)
                 staged_config.write_bytes(existing_config)
 
             # Preserve profile-local files unknown to the reusable source. The
@@ -1958,7 +2038,11 @@ class ExtensionManager:
                             destination.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(existing, destination)
 
-            self._validate_extension_directory(staging, 'Staged autofill extension')
+            self._validate_extension_directory(
+                staging,
+                f"Staged extension {extension_name}",
+                require_config=extension_name == AUTOFILL_EXTENSION_NAME,
+            )
             if target.exists():
                 target.replace(backup)
                 moved_to_backup = True
@@ -1973,7 +2057,7 @@ class ExtensionManager:
             raise
         except (OSError, shutil.Error) as error:
             raise ExtensionDeploymentError(
-                f"Could not deploy the autofill extension for profile {profile_id}."
+                f"Could not deploy extension {extension_name} for profile {profile_id}."
             ) from error
         finally:
             if staging.exists():
@@ -1986,6 +2070,19 @@ class ExtensionManager:
                     backup.replace(target)
                 except OSError:
                     logger.error("Previous extension deployment could not be restored for profile %s", profile_id)
+
+    def ensure_required_extensions(self, profile_id):
+        """Deploy available product defaults without changing the source registry."""
+        sources = self.discover_sources()
+        if AUTOFILL_EXTENSION_NAME not in sources:
+            raise ExtensionNotFoundError(
+                f"Autofill extension source not found at {self.get_source_path()}"
+            )
+        paths = []
+        for extension_name in REQUIRED_EXTENSION_NAMES:
+            if extension_name in sources:
+                paths.append(self.ensure_profile_extension(profile_id, extension_name))
+        return paths
 
 
 class AccountManager:
@@ -2001,7 +2098,7 @@ class AccountManager:
 
     def _ensure_both_extensions_installed(self, profile_id):
         """Compatibility name retained for callers from the pre-M5 workflow."""
-        return [self._ensure_extension_installed(profile_id)]
+        return self.extension_manager.ensure_required_extensions(profile_id)
     
     def _get_config_path(self, profile_id):
         """Get path to config.js for profile"""
@@ -2071,7 +2168,7 @@ class AccountManager:
         
         # Deploy the reusable source and retain this profile's existing config
         # until the new account configuration is written below.
-        self._ensure_extension_installed(profile_id)
+        self._ensure_both_extensions_installed(profile_id)
         
         # Enable developer mode
         self._enable_developer_mode(profile_id)
@@ -2296,7 +2393,7 @@ class ProfileManagerApp:
         self.root = root
         self.root.title("Discord Profile Manager")
         self.root.geometry("1100x650")
-        self.root.minsize(850, 450)
+        self.root.minsize(1200, 800)
         self.root.configure(bg='#f0f0f0')
         
         # Initialize managers

@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import tempfile
 from pathlib import PureWindowsPath
+import threading
+import time
 
 from .core import (
     MANAGER_PATH_KEY,
@@ -84,6 +86,58 @@ class OperationLock:
         finally:
             if lock is not None:
                 lock.close()
+
+
+class CatalogWriteCoordinator:
+    """Coordinate application-catalog mutations and atomic publication.
+
+    A coordinator is shared by every ``ProfileCatalogStore`` for the same
+    absolute catalog path.  The process-local mutation gate prevents two
+    service instances from loading and changing stale snapshots at the same
+    time.  The file lock and the publication lock cover direct store writes
+    and protect against another manager process as well.
+    """
+
+    _instances = {}
+    _instances_lock = threading.Lock()
+
+    @classmethod
+    def for_path(cls, path, root, logger=None):
+        key = str(Path(path).absolute()).casefold()
+        with cls._instances_lock:
+            coordinator = cls._instances.get(key)
+            if coordinator is None:
+                coordinator = cls(path, root, logger)
+                cls._instances[key] = coordinator
+            return coordinator
+
+    def __init__(self, path, root, logger=None):
+        self.path = Path(path).absolute()
+        self.logger = _logger_or_null(logger)
+        self._mutation_lock = threading.RLock()
+        self._write_lock = threading.RLock()
+        self._file_lock = OperationLock(
+            self.path.with_name(".profiles.lock"), root, logger
+        )
+
+    @contextmanager
+    def mutation(self):
+        """Serialize one catalog mutation without holding the write lock.
+
+        Batch imports use this gate while doing profile-local filesystem work;
+        the shorter write lock is acquired only for the final catalog commit.
+        """
+        with self._mutation_lock:
+            yield
+
+    @contextmanager
+    def write(self):
+        """Serialize and publish one catalog write."""
+        with self._mutation_lock:
+            with self._write_lock:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with self._file_lock.acquire():
+                    yield
 
 
 class LegacyStateStore:
@@ -226,8 +280,12 @@ class ProfileCatalogStore:
     """Application-owned versioned catalog with atomic optimistic writes."""
 
     _forbidden_fragments = (
-        "password", "token", "totp", "cookie", "session", "proxycredential", "extensionsecret"
+        "password", "token", "totp", "cookie", "session", "credential", "secret"
     )
+    # Proxy credentials are the one explicit credential-bearing exception:
+    # they are requested for account export and are written only by the proxy
+    # service.  Account secrets remain prohibited from profiles.json.
+    _allowed_credential_fields = {"proxyusername", "proxypassword"}
     required_fields = {
         "profile_id", "display_name", "profile_directory", "created_at",
         "last_opened_at", "proxy_enabled",
@@ -238,13 +296,19 @@ class ProfileCatalogStore:
         self.path = paths.profiles_json
         self._loaded_bytes = None
         self.logger = _logger_or_null(logger)
+        self.coordinator = CatalogWriteCoordinator.for_path(
+            self.path, self.paths.root, logger
+        )
 
     @classmethod
     def _validate_field_names(cls, value):
         if isinstance(value, dict):
             for field, nested in value.items():
                 normalized = str(field).replace("_", "").replace("-", "").casefold()
-                if any(fragment in normalized for fragment in cls._forbidden_fragments):
+                if (
+                    normalized not in cls._allowed_credential_fields
+                    and any(fragment in normalized for fragment in cls._forbidden_fragments)
+                ):
                     raise ValueError(f"Sensitive field is not allowed in profiles.json: {field}")
                 cls._validate_field_names(nested)
         elif isinstance(value, list):
@@ -325,8 +389,25 @@ class ProfileCatalogStore:
                 "Cannot read application profile metadata. The file was left unchanged."
             ) from error
 
-    def save(self, data):
-        """Validate, revalidate, fsync, and atomically publish the catalog."""
+    @staticmethod
+    def _replace_with_bounded_retry(source, destination, *, attempts=3):
+        """Publish a closed temp file, retrying only transient Windows locks."""
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                source.replace(destination)
+                return
+            except OSError as error:
+                last_error = error
+                winerror = getattr(error, "winerror", None)
+                if winerror not in {5, 32} or attempt + 1 >= attempts:
+                    raise
+                time.sleep(0.02 * (2 ** attempt))
+        if last_error is not None:
+            raise last_error
+
+    def _save_unlocked(self, data):
+        """Validate and publish while the shared coordinator is held."""
         temp_path = None
         try:
             self._validate(data, self.paths)
@@ -352,7 +433,7 @@ class ProfileCatalogStore:
                 candidate_bytes.decode("utf-8"), object_pairs_hook=self._unique_keys
             )
             self._validate(candidate, self.paths)
-            temp_path.replace(self.path)
+            self._replace_with_bounded_retry(temp_path, self.path)
             self._loaded_bytes = candidate_bytes
         except ProfileManagerError:
             raise
@@ -367,6 +448,11 @@ class ProfileCatalogStore:
                     temp_path.unlink()
                 except OSError:
                     self.logger.warning("Could not remove a temporary profiles.json file")
+
+    def save(self, data):
+        """Validate and atomically publish through the shared coordinator."""
+        with self.coordinator.write():
+            return self._save_unlocked(data)
 
 
 class ExtensionPolicyStore:

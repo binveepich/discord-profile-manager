@@ -131,7 +131,7 @@ class R10EnvironmentTests(unittest.TestCase):
         app.edit_environment()
 
         preset = variables[0]
-        width, height, scale, language, timezone, mobile, touch = variables[1:]
+        width, height, language, timezone, mobile, touch = variables[1:]
         change_preset = app.ttk.Combobox.return_value.bind.call_args.args[1]
         for entry in entries:
             entry.config.assert_called_with(state="disabled")
@@ -143,13 +143,11 @@ class R10EnvironmentTests(unittest.TestCase):
         preset.set("Custom")
         change_preset()
         self.assertEqual(width.get(), "")
-        for entry in entries[:4]:
+        for entry in entries[:3]:
             entry.config.assert_called_with(state="normal")
-        entries[4].config.assert_called_with(state="disabled")
         self.assertFalse(mobile.get())
         width.set("1100")
         height.set("760")
-        scale.set("1.5")
         language.set("vi-VN")
         touch.set(True)
         preset.set("Desktop")
@@ -159,7 +157,6 @@ class R10EnvironmentTests(unittest.TestCase):
         change_preset()
         self.assertEqual(width.get(), 1100)
         self.assertEqual(height.get(), 760)
-        self.assertEqual(scale.get(), 1.5)
         self.assertEqual(language.get(), "vi-VN")
         self.assertTrue(touch.get())
 

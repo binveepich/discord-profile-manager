@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color-scheme: dark; background: #090b10; }
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; overflow: hidden; }
+body { margin: 0; min-width: 320px; background: radial-gradient(circle at 8% -10%, rgba(114,137,218,.14), transparent 32rem), #090b10; }
+button, input, select, textarea { font: inherit; }
+button:disabled { cursor: not-allowed; opacity: .45; }
+@layer components {
+  .panel { @apply rounded-xl border border-line/80 bg-panel shadow-panel; }
+  .control { @apply rounded-lg border border-line bg-elevated px-3 py-2 text-sm text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-accent/70 focus:ring-2 focus:ring-accent/10; }
+  .primary-button { @apply inline-flex items-center gap-2 rounded-lg bg-accent px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-[#8499e2] focus:outline-none focus:ring-2 focus:ring-accent/40; }
+  .secondary-button { @apply inline-flex items-center gap-2 rounded-lg border border-line bg-elevated px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-slate-500 hover:bg-[#1d2430] focus:outline-none focus:ring-2 focus:ring-accent/30; }
+  .icon-button { @apply grid h-9 w-9 place-items-center rounded-lg border border-line bg-elevated text-slate-400 transition hover:border-slate-500 hover:bg-[#1d2430] hover:text-white focus:outline-none focus:ring-2 focus:ring-accent/30; }
+  .row-action { @apply grid h-8 w-8 place-items-center rounded-md text-slate-500 opacity-0 transition hover:bg-white/10 hover:text-white group-hover:opacity-100; }
+  .action-button { @apply flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition disabled:opacity-35; }
+  .eyebrow { @apply text-[10px] font-semibold uppercase tracking-[.16em] text-slate-500; }
+  .field-label { @apply block text-xs font-medium text-slate-400; }
+  .tab { @apply flex items-center gap-2 border-b-2 border-transparent px-1 py-3 mr-6 text-sm text-slate-500 transition hover:text-slate-300; }
+  .tab-active { @apply border-accent text-white; }
+  .toggle { @apply relative h-6 w-11 rounded-full bg-slate-700 transition; }
+  .toggle span { @apply absolute left-1 top-1 h-4 w-4 rounded-full bg-white transition; }
+  .toggle-on { @apply bg-accent; }
+  .toggle-on span { @apply translate-x-5; }
+}
+.app-shell { @apply flex h-full min-h-0 flex-col overflow-hidden; }
+.app-main { @apply flex min-h-0 flex-1 gap-5 overflow-hidden p-5 lg:p-6; }
+.dashboard-content { @apply flex min-h-0 min-w-0 flex-1 flex-col gap-5; }
+.sidebar { @apply min-h-0 flex-none overflow-y-auto; }
+.profile-table-panel { min-height: 0; }
+.table-scroll { scrollbar-gutter: stable; }
+.profile-area-button { min-height: 38px; padding-left: 14px; padding-right: 14px; }
+.profile-table-panel input[type="checkbox"] { width: 18px; height: 18px; }
+.profile-table-panel .row-action { width: 36px; height: 36px; }
+.modal-backdrop { @apply fixed inset-0 z-40 grid place-items-center bg-black/65 p-4 backdrop-blur-sm; }
+.modal-card { @apply max-h-[92vh] w-full overflow-auto rounded-2xl border border-line bg-panel shadow-2xl; }
+.editor-modal { width: 540px; height: 720px; max-width: calc(100vw - 32px); max-height: calc(100vh - 24px); @apply flex flex-col overflow-hidden; }
+.editor-modal-body { @apply min-h-0 flex-1 overflow-y-auto; }
+.environment-source { display: inline-flex; align-items: center; border-radius: 999px; padding: 1px 6px; font-size: 9px; line-height: 1.35; font-weight: 600; white-space: nowrap; }
+.environment-source-system { background: rgba(96, 165, 250, .12); color: #93c5fd; }
+.environment-source-generated { background: rgba(114, 137, 218, .15); color: #a5b4fc; }
+.environment-source-applied { background: rgba(52, 211, 153, .12); color: #6ee7b7; }
+.environment-source-metadata { background: rgba(251, 191, 36, .12); color: #fcd34d; }
+.environment-source-unsupported { background: rgba(251, 113, 133, .12); color: #fda4af; }
+.scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+.scrollbar::-webkit-scrollbar-thumb { border-radius: 999px; background: #2b3443; }
+input[type="checkbox"] { accent-color: #7289da; }

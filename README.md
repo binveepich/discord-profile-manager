@@ -58,9 +58,10 @@ GitHub release artifact until the user explicitly approves the source-code versi
   compatibility mirror only after the copy succeeds, and leaves the legacy
   source in place. A failed copy or metadata update leaves the source untouched
   and reports the paths involved.
-- The supported extension source is discovered under root `extensions/`.
-  `manifest.json`, `config.js`, and files declared by the manifest are validated
-  before deployment.
+- Root `extensions/` is the application-owned extension registry. Every
+   subdirectory with a valid `manifest.json` is discovered deterministically;
+   declared manifest files are validated before deployment. The autofill
+   account workflow additionally requires its profile-specific `config.js`.
 - Because the current content-script design embeds profile-specific account
   configuration in `config.js`, each profile keeps its own unpacked deployment
   under `Unpacked Extensions/`. Reusable source files are refreshed from the
@@ -72,6 +73,15 @@ Legacy profile data, managed profiles, and logs remain excluded from Git.
 Chromium runtime files are unchanged. Browser environment and proxy settings are
 launch metadata only; they do not change Chromium source or implement deep
 fingerprint spoofing.
+
+## React product candidate
+
+The daily-use source candidate is available without changing the rollback-safe
+root `main.py`. It uses React/Vite/Tailwind in `frontend/`, hosted by pywebview,
+with Python `revamped/product_api.py` as the authoritative bridge. Build it with
+`npm install` and `npm run build` from `frontend/`, then run
+`python -m revamped.product_main`. See [docs/PRODUCT_CANDIDATE.md](docs/PRODUCT_CANDIDATE.md)
+for the account, proxy, export, backup, and snapshot behavior.
 
 ## M7 environment behavior
 
@@ -99,8 +109,12 @@ fingerprint spoofing.
 
 ## M5 extension behavior
 
-- Account setup deploys the supported autofill extension using a staged copy, then
-  writes only the selected profile's `config.js`.
+- Account setup deploys only the approved autofill extension using staged
+   per-profile copies, then writes only the selected profile's autofill
+   `config.js`. The bundled token-extractor source is quarantined and is never
+   required, enabled, staged, or launched.
+- Other valid extensions in the registry remain available for explicit future
+   default policies without adding another hard-coded deployment path.
 - Existing profile deployments are compatible across manager restarts. Missing or
   invalid optional deployments are skipped during launch so browser profile data
   remains usable; account setup reports source/deployment errors clearly.
@@ -108,6 +122,18 @@ fingerprint spoofing.
   configuration between profiles. Extra profile-local extension files are retained.
 - Account import continues to create isolated browser roots and isolated extension
   configuration for each imported synthetic account.
+
+## R14 workspace and account boundary
+
+The revamped development composition requires an explicit workspace below the
+repository `tmp/` directory and accepts only synthetic `@example.invalid`
+account identifiers. Product mode requires a separate explicit `--product-root`
+decision (or the `compose_product()` API); it refuses unmarked existing state
+and never infers the repository's live `profiles/` or `config/` directories.
+Product mode persists only an account label and non-sensitive identifier.
+Passwords, tokens, TOTP secrets, sessions, cookies, and equivalent fields are
+rejected. The R14 product boundary remains a parallel/dev-only composition;
+the root `main.py` and packaging are unchanged and locked.
 
 When `config/profiles.json` is missing or empty, the manager imports registered
 M1-M3 profiles and discovers valid existing managed profile roots without

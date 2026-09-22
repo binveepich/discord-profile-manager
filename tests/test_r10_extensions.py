@@ -53,9 +53,7 @@ class R10ExtensionIntegrationTests(unittest.TestCase):
 
     def test_missing_required_registry_source_fails_before_any_deployment(self):
         paths, profiles, profile_id, extensions, _ = self.make_bundle()
-        self.make_source(paths, REQUIRED_EXTENSION_NAMES[0])
-
-        with self.assertRaisesRegex(ExtensionNotFoundError, REQUIRED_EXTENSION_NAMES[1]):
+        with self.assertRaisesRegex(ExtensionNotFoundError, REQUIRED_EXTENSION_NAMES[0]):
             extensions.ensure_required_extensions(profile_id)
 
         self.assertEqual(extensions.get_profile_extension_paths(profile_id), [])
@@ -63,22 +61,20 @@ class R10ExtensionIntegrationTests(unittest.TestCase):
 
     def test_invalid_required_registry_source_is_not_silently_omitted(self):
         paths, _, profile_id, extensions, _ = self.make_bundle()
-        for name in REQUIRED_EXTENSION_NAMES:
-            self.make_source(paths, name)
-        (paths.extensions_dir / REQUIRED_EXTENSION_NAMES[1] / "manifest.json").write_text(
+        self.make_source(paths, REQUIRED_EXTENSION_NAMES[0])
+        (paths.extensions_dir / REQUIRED_EXTENSION_NAMES[0] / "manifest.json").write_text(
             "{broken", encoding="utf-8"
         )
 
-        with self.assertRaisesRegex(ExtensionError, REQUIRED_EXTENSION_NAMES[1]):
+        with self.assertRaisesRegex(ExtensionError, REQUIRED_EXTENSION_NAMES[0]):
             extensions.ensure_required_extensions(profile_id)
 
         self.assertEqual(extensions.get_profile_extension_paths(profile_id), [])
 
     def test_manifest_with_missing_required_script_fails_before_launch(self):
         paths, _, profile_id, extensions, _ = self.make_bundle()
-        for name in REQUIRED_EXTENSION_NAMES:
-            self.make_source(paths, name)
-        (paths.extensions_dir / REQUIRED_EXTENSION_NAMES[1] / "manifest.json").write_text(
+        self.make_source(paths, REQUIRED_EXTENSION_NAMES[0])
+        (paths.extensions_dir / REQUIRED_EXTENSION_NAMES[0] / "manifest.json").write_text(
             json.dumps({
                 "manifest_version": 3,
                 "background": {"service_worker": "missing.js"},
@@ -121,13 +117,13 @@ class R10ExtensionIntegrationTests(unittest.TestCase):
         for name in REQUIRED_EXTENSION_NAMES:
             self.make_source(paths, name)
         deployed = extensions.ensure_required_extensions(profile_id)
-        (deployed[1] / "manifest.json").write_text("{broken", encoding="utf-8")
+        (deployed[0] / "manifest.json").write_text("{broken", encoding="utf-8")
 
         refreshed = extensions.ensure_required_extensions(profile_id)
 
         self.assertEqual(refreshed, deployed)
         self.assertEqual(
-            json.loads((refreshed[1] / "manifest.json").read_text(encoding="utf-8"))["manifest_version"],
+            json.loads((refreshed[0] / "manifest.json").read_text(encoding="utf-8"))["manifest_version"],
             3,
         )
 

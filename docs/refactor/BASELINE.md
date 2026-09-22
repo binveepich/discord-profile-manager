@@ -4,12 +4,19 @@ Captured on 2026-09-15 before any revamped implementation changes.
 
 ## Git baseline
 
-- Baseline commit: `9a92bb9f679591fbbddb2fd7b1239a4e829d3658`
-- Baseline subject: `M11: add source app manual acceptance checklist`
+- Baseline commit: `ca9c5661fb9cedc2ecaf884c58547a8672bfcf71`
+- Baseline subject: `R0: freeze legacy refactor baseline`
 - Baseline branch: `main`
 - Refactor branch: `refactor/revamped-parallel`
 - Tracked source diff before refactor: clean
 - Pre-existing untracked files: preserved and not staged by R0
+
+R14 repaired a historical record mismatch: the earlier draft named the later
+`main` documentation commit as the baseline and listed checkout hashes that do
+not identify the Git blobs at R0. The verifier now anchors the immutable
+baseline to the R0 commit above and normalizes Windows line endings before
+hashing. This is an explicit correction to the governance record, not a
+redefinition of a changed protected file as the baseline.
 
 ## Verification baseline
 
@@ -35,10 +42,10 @@ baseline. They are integrity evidence only; no protected runtime data was read.
 
 | Protected file | Blob hash |
 | --- | --- |
-| `legacy/profile_manager.py` | `7c4d20b868e47e2be8a9293df78a4d13a63bbeae` |
+| `legacy/profile_manager.py` | `238e180952835fd87f893ca18df00ca73f6d5c67` |
 | `main.py` | `1dd57b45b1c4bfbb574818816e1f3251001d56e0` |
-| `tests/test_m1_runtime.py` | `c9321395af0d36775f00dd612617cc43cca18d5c` |
-| `tests/test_m2_lifecycle.py` | `aa5a3b8635651bca3fb01ca7b6dc364443dc5941` |
+| `tests/test_m1_runtime.py` | `00bc5d212a33ac9947f4ddfc5418bb331ed4d540` |
+| `tests/test_m2_lifecycle.py` | `847f333b6520b44d45a4263ee36411dd6f5a7d9f` |
 | `tests/test_m3_migration.py` | `60a8831eac1bbef47f780c4c1e1ce4ac0cae697b` |
 | `tests/test_m4_metadata.py` | `738a92e04689760b2383ec2f7856d680170d2ec9` |
 | `tests/test_m5_extensions.py` | `944be25e6c3f3c9d771a4644f30e3e6ffe85a2b9` |

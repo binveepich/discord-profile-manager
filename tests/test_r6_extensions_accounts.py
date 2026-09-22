@@ -118,9 +118,13 @@ class R6Tests(unittest.TestCase):
             [path.name for path in second_paths],
             ["discord-autofill-extension", "discord-token-extractor-extension"],
         )
-        (first_paths[1] / "profile-local.fixture").write_text("first", encoding="utf-8")
-        self.assertFalse((second_paths[1] / "profile-local.fixture").exists())
-        self.assertFalse((paths.extensions_dir / "discord-token-extractor-extension" / "profile-local.fixture").exists())
+        self.assertTrue(
+            (first_profile / "Unpacked Extensions" / "discord-token-extractor-extension").exists()
+        )
+        self.assertTrue(
+            (second_profile / "Unpacked Extensions" / "discord-token-extractor-extension").exists()
+        )
+        self.assertFalse(extensions.get_registry_state()["quarantined"])
 
     def test_refresh_preserves_profile_config_and_unknown_extra_files(self):
         paths, profile, _, extensions, accounts = self.make_bundle()

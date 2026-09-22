@@ -12,11 +12,11 @@ Date: 2026-09-17. Scope: connect and verify the existing revamped launch path in
 
 Fresh profile creation initialized the profile directory, Preferences, and an empty `Unpacked Extensions/` directory. The open action only enumerated deployments; it did not create them. Deployment was reached through the separate account path: `set_account` → `AccountCompatibilityService.set_account` → `ensure_required_extensions`. A profile without account setup therefore supplied no extension paths. Configuration stopped at the missing deployment step, before command assembly.
 
-There was a second defect: `ensure_required_extensions` required Autofill but silently omitted Token Extractor if its registry source was missing or invalid.
+There was a second defect: `ensure_required_extensions` required Autofill but silently omitted a second registry extension if its source was missing or invalid. R14 subsequently quarantines the token-extractor source entirely because it is outside the product security boundary.
 
-**R10 path:** `compose` injects the registry-backed `ExtensionService` into the launcher. After checking the profile exists and is stopped, `launch_discord` calls `ensure_required_extensions`, merges both built-ins with any existing optional paths, then builds and executes the command. Account configuration is not required. Clicking Open on an already running profile returns without refreshing its deployed extension files.
+**R10 path:** `compose` injects the registry-backed `ExtensionService` into the launcher. After checking the profile exists and is stopped, `launch_discord` calls `ensure_required_extensions`, merges the approved built-in with any enabled optional paths, then builds and executes the command. Account configuration is not required. Clicking Open on an already running profile returns without refreshing its deployed extension files. R14 removes the token-extractor source from this launch path.
 
-The registry is `I:\Discord_Profile_Manager\extensions`. Built-ins are copied through validated staging into the disposable profile, preserving profile-local `config.js` and extra files. Missing or invalid required sources now fail clearly. Both deployed directories are validated, including manifest declarations and referenced scripts/icons. Only deployed workspace-local paths enter the extension switches. Repository sources remain untouched.
+The registry is `I:\Discord_Profile_Manager\extensions`. The approved Autofill built-in is copied through validated staging into the disposable profile, preserving profile-local `config.js` and extra files. Missing or invalid required sources fail clearly. Deployed directories are validated, including manifest declarations and referenced scripts/icons. Only deployed workspace-local paths enter the extension switches. Repository sources remain untouched. R14 excludes the token-extractor directory from discovery and deployment.
 
 ### Environment
 
@@ -59,7 +59,7 @@ A future interactive/product mode should explicitly select production state path
 
 ## Runtime results
 
-- **Extension runtime: PASS.** Both built-ins were supplied in every real launch and reported `ENABLED` by the running Chromium extensions page, with empty manifest/runtime error lists. No account setup was required.
+- **Extension runtime: PASS (historical R10 evidence).** The then-configured built-ins were supplied in every real launch and reported `ENABLED` by the running Chromium extensions page. R14 supersedes that historical token-extractor configuration and requires only the approved Autofill built-in.
 - **Proxy runtime: PASS for the local unauthenticated HTTP fixture.** The actual process contained the configured proxy switch, the fixture proxy recorded the requested reserved hostname, and the restarted Proxy Off case contained no proxy switch and used the direct local fixture.
 - **Environment runtime: PASS for supported requests and truthful limitations.** Actual processes received the saved switches; window bounds, scale, language, and touch-event differences were measured. Mobile emulation and timezone override remain explicitly unsupported.
 
@@ -93,8 +93,8 @@ Each JSON string below is one argv element. There are no account credentials or 
   "--touch-events=enabled",
   "--proxy-server=http://127.0.0.1:64132",
   "https://discord.com/app",
-  "--disable-extensions-except=I:\\Discord_Profile_Manager\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003\\Unpacked Extensions\\discord-autofill-extension,I:\\Discord_Profile_Manager\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003\\Unpacked Extensions\\discord-token-extractor-extension",
-  "--load-extension=I:\\Discord_Profile_Manager\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003\\Unpacked Extensions\\discord-autofill-extension,I:\\Discord_Profile_Manager\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003\\Unpacked Extensions\\discord-token-extractor-extension"
+  "--disable-extensions-except=I:\\Discord_Profile_Manager\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003\\Unpacked Extensions\\discord-autofill-extension",
+  "--load-extension=I:\\Discord_Profile_Manager\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003\\Unpacked Extensions\\discord-autofill-extension"
 ]
 ```
 
@@ -112,15 +112,15 @@ For the proxy case the replacement destination is `http://r10-proxy.invalid/r10-
 
 ## Files changed for R10
 
-- `revamped/extensions.py`: require both built-in sources and fail clearly on invalid required sources.
+- `revamped/extensions.py`: require the approved Autofill source and fail clearly on invalid required sources.
 - `revamped/launcher.py`: deploy and merge required extensions at launch after the running guard; report environment runtime limitations without secrets.
 - `revamped/main.py`: inject the shared extension service into the launcher.
 - `revamped/environment.py`: document existing switch meanings and expose unsupported/limited runtime notes.
 - `revamped/gui.py`: refresh environment preset state, identify unsupported controls, reject authenticated proxy input, and explain when saved changes apply.
-- `tests/test_r6_extensions_accounts.py`: provide both built-in sources in the existing synthetic fixture.
+- `tests/test_r6_extensions_accounts.py`: provide the approved built-in and quarantine coverage for prohibited sources.
 - `tests/test_r10_extensions.py`: registry/deployment/real command-assembly checks, missing/invalid source failures, repair, source integrity.
 - `tests/test_r10_environment.py`: saved settings through restart, actual command assembly, editor state, unsupported notes.
-- `tests/test_r10_runtime_integration.py`: composed GUI-to-launch settings, both built-ins without accounts, Proxy Off, and running-profile deployment guard.
+- `tests/test_r10_runtime_integration.py`: composed GUI-to-launch settings, the approved built-in without accounts, Proxy Off, and running-profile deployment guard.
 - `tests/test_r10_proxy_gui.py`: real controller/persistence with editor callbacks; authenticated input rejection, unauthenticated reparse, explicit Off, and absence of saved credentials.
 - `tests/browser_smoke_r10.py`: opt-in real Chromium smoke with local direct/proxy fixtures and retained workspace evidence.
 - `docs/refactor/R10_RUNTIME_INTEGRATION.md`: this trace and verification report.
@@ -147,7 +147,7 @@ The diagnostic script uses the existing `psutil` dependency and optional diagnos
 
 ## Remaining manual tests
 
-1. Open a newly created disposable profile from the visible revamped GUI without configuring an account. Confirm both built-ins appear enabled in `chrome://extensions`.
+1. Open a newly created disposable profile from the visible revamped GUI without configuring an account. Confirm only the approved Autofill built-in appears enabled in `chrome://extensions`; confirm the token-extractor source is absent from the launch.
 2. Switch Desktop → Mobile → Custom in the environment dialog. Confirm the displayed values/editability change correctly and Custom edits survive switching away and back. Save, close Chromium, reopen, and inspect visible window size, scale, language, and touch-event behavior. Do not expect mobile device emulation or timezone override.
 3. Configure an authorized unauthenticated external proxy, close and reopen the profile, and compare its public egress IP against Proxy Off. This external-network result was not tested by the local smoke. HTTPS/SOCKS4/SOCKS5 endpoints need their own reachable endpoint verification.
 4. Paste and Parse an authenticated proxy string, then confirm enabled Save is rejected and no credentials are stored. Test ordinary `host:port` input and switching to Off.
