@@ -1,9 +1,30 @@
-const waiters = [];
+const waiters = new Set();
 let nativeApi = null;
 
 function attach() {
-  nativeApi = window.pywebview?.api || null;
-  waiters.splice(0).forEach((resolve) => resolve(nativeApi));
+  const api = window.pywebview?.api || null;
+  if (!api) return;
+  nativeApi = api;
+  for (const listener of [...waiters]) {
+    waiters.delete(listener);
+    listener(nativeApi);
+  }
+}
+
+export class BridgeNotReadyError extends Error {
+  constructor() {
+    super("The desktop bridge is not ready yet.");
+    this.name = "BridgeNotReadyError";
+    this.code = "BRIDGE_NOT_READY";
+  }
+}
+
+export class BridgeMethodUnavailableError extends Error {
+  constructor(method) {
+    super(`The desktop backend does not provide ${String(method)}.`);
+    this.name = "BridgeMethodUnavailableError";
+    this.code = "BRIDGE_METHOD_UNAVAILABLE";
+  }
 }
 
 if (typeof window !== "undefined") {
@@ -18,18 +39,33 @@ export function hasNativeBridge() {
 export function waitForBridge(timeout = 2500) {
   if (hasNativeBridge()) return Promise.resolve(nativeApi || window.pywebview.api);
   return new Promise((resolve) => {
-    const timer = window.setTimeout(() => resolve(null), timeout);
-    waiters.push((api) => {
-      window.clearTimeout(timer);
+    let timer = null;
+    let settled = false;
+    const finish = (api) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) window.clearTimeout(timer);
+      waiters.delete(onReady);
       resolve(api);
-    });
+    };
+    const onReady = (api) => finish(api);
+    waiters.add(onReady);
+    timer = window.setTimeout(() => finish(null), Math.max(0, timeout));
   });
 }
 
 export async function call(method, ...args) {
-  const api = await waitForBridge();
-  if (!api || typeof api[method] !== "function") {
-    throw new Error("The desktop bridge is unavailable.");
-  }
+  const api = nativeApi || window.pywebview?.api;
+  if (!api) throw new BridgeNotReadyError();
+  if (typeof api[method] !== "function") throw new BridgeMethodUnavailableError(method);
   return api[method](...args);
+}
+
+export function onBridgeReady(callback) {
+  if (hasNativeBridge()) {
+    callback(nativeApi || window.pywebview.api);
+    return () => {};
+  }
+  waiters.add(callback);
+  return () => waiters.delete(callback);
 }

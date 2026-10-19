@@ -1,25 +1,31 @@
 import { useEffect, useState } from "react";
-import { Check, CircleAlert, Cpu, Eye, LoaderCircle, Palette, Puzzle, Save, SlidersHorizontal } from "lucide-react";
+import { Accessibility, Check, CircleAlert, Cpu, Eye, LoaderCircle, Puzzle, Save, X } from "lucide-react";
 import { call } from "../api/bridge";
-import { UI, userError } from "../i18n";
+import { userError } from "../i18n";
+import useDialogMotion from "../useDialogMotion";
 
 const COLUMN_OPTIONS = [
-  ["account", "Tài khoản", "Hiển thị định danh tài khoản an toàn"],
+  ["account", "Tài khoản", "Hiển thị định danh tài khoản"],
   ["environment", "Môi trường / Proxy", "Hiển thị preset và trạng thái Proxy"],
-  ["status", "Trạng thái", "Hiển thị hồ sơ đang mở hay đã đóng"],
-  ["last_opened", "Mở gần đây", "Hiển thị thời điểm sử dụng gần nhất"],
+  ["last_opened", "Mở gần đây", "Hiển thị lần sử dụng gần nhất"],
 ];
 
-export default function SettingsPage({ preferences, onPreferenceChange, notify }) {
+export default function SettingsPage({ preferences, onPreferenceChange, notify, onClose }) {
   const [runtime, setRuntime] = useState(null);
   const [extensions, setExtensions] = useState(null);
   const [loading, setLoading] = useState(true);
   const [savingExtension, setSavingExtension] = useState("");
+  const { closeDialog, dialogRef, backdropClassName, dialogClassName } = useDialogMotion(onClose);
 
   useEffect(() => {
     let active = true;
     Promise.all([call("get_runtime_info"), call("get_extension_policy")])
-      .then(([nextRuntime, nextExtensions]) => { if (active) { setRuntime(nextRuntime); setExtensions(nextExtensions); } })
+      .then(([nextRuntime, nextExtensions]) => {
+        if (active) {
+          setRuntime(nextRuntime);
+          setExtensions(nextExtensions);
+        }
+      })
       .catch((error) => { if (active) notify(userError(error), "error"); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
@@ -36,25 +42,69 @@ export default function SettingsPage({ preferences, onPreferenceChange, notify }
     try {
       setExtensions(await call("set_optional_extension_policy", name, enabled));
       notify(enabled ? "Đã bật tiện ích tùy chọn." : "Đã tắt tiện ích tùy chọn.");
-    } catch (error) { notify(userError(error), "error"); } finally { setSavingExtension(""); }
+    } catch (error) { notify(userError(error), "error"); }
+    finally { setSavingExtension(""); }
   };
 
-  return <main className="page-scroll"><div className="page-header"><div><p className="eyebrow">Tùy chỉnh ứng dụng</p><h2 className="page-title">Cài đặt</h2><p className="page-description">Các lựa chọn này chỉ ảnh hưởng giao diện quản lý, không thay đổi dữ liệu Chromium của hồ sơ.</p></div><div className="save-note"><Save className="h-4 w-4" /> Tự động lưu</div></div>
-    <div className="settings-grid">
-      <section className="panel settings-card"><div className="settings-heading"><Palette className="settings-icon" /><div><h3>Giao diện</h3><p>Chọn cách hiển thị phù hợp với môi trường làm việc.</p></div></div><div className="settings-body">
-        <label className="field-label">Chủ đề<select className="control mt-2 w-full" value={preferences.theme} onChange={(event) => onPreferenceChange({ theme: event.target.value })}><option value="system">{UI.theme.system}</option><option value="light">{UI.theme.light}</option><option value="dark">{UI.theme.dark}</option></select></label>
-        <label className="field-label">Mật độ bảng hồ sơ<select className="control mt-2 w-full" value={preferences.density} onChange={(event) => onPreferenceChange({ density: event.target.value })}><option value="comfortable">Thoải mái</option><option value="compact">Gọn</option></select></label>
-        <Toggle checked={preferences.reduce_motion} onChange={(value) => onPreferenceChange({ reduce_motion: value })} label="Giảm chuyển động" description="Tắt các hiệu ứng không cần thiết để dễ tập trung." />
-        <Toggle checked={preferences.sidebar_collapsed} onChange={(value) => onPreferenceChange({ sidebar_collapsed: value })} label="Ẩn bảng tác vụ bên phải" description="Mở rộng không gian bảng khi bạn chỉ làm việc với danh sách." />
-      </div></section>
+  const closeFromBackdrop = (event) => {
+    if (event.target === event.currentTarget) closeDialog();
+  };
 
-      <section className="panel settings-card"><div className="settings-heading"><Eye className="settings-icon" /><div><h3>Cột hiển thị</h3><p>Giữ lại thông tin cần thiết cho bảng hồ sơ.</p></div></div><div className="settings-body settings-options">{COLUMN_OPTIONS.map(([key, label, description]) => <Toggle key={key} checked={preferences.visible_columns.includes(key)} onChange={() => toggleColumn(key)} label={label} description={description} />)}</div></section>
+  return (
+    <div className={backdropClassName} onMouseDown={closeFromBackdrop}>
+      <section ref={dialogRef} tabIndex={-1} className={`modal-card settings-modal ${dialogClassName}`} role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <header className="dialog-header">
+          <div>
+            <p className="eyebrow">Tùy chỉnh ứng dụng</p>
+            <h2 id="settings-title">Cài đặt</h2>
+            <p className="dialog-description">Các lựa chọn này chỉ ảnh hưởng giao diện quản lý, không thay đổi dữ liệu Chromium.</p>
+          </div>
+          <div className="dialog-heading-actions"><span className="save-note"><Save className="h-4 w-4" /> Tự động lưu</span>
+            <button className="icon-button tooltip-trigger" type="button" onClick={closeDialog} aria-label="Đóng cài đặt" data-tooltip="Đóng" title="Đóng"><X className="h-4 w-4" /></button>
+          </div>
+        </header>
 
-      <section className="panel settings-card"><div className="settings-heading"><Cpu className="settings-icon" /><div><h3>Trình duyệt</h3><p>Thông tin runtime được đọc an toàn, không tự khởi chạy Chromium.</p></div></div><div className="settings-body">{loading ? <div className="loading-line"><LoaderCircle className="spin-once h-4 w-4" /> Đang kiểm tra runtime…</div> : runtime ? <div className="runtime-summary"><InfoRow label="Runtime" value={runtime.runtime_name} /><InfoRow label="Phiên bản" value={runtime.browser_version} /><div className={runtime.browser_available ? "runtime-ready" : "runtime-warning"}>{runtime.browser_available ? <Check className="h-4 w-4" /> : <CircleAlert className="h-4 w-4" />}{runtime.browser_available ? "Sẵn sàng sử dụng" : "Chưa tìm thấy browser/chrome.exe"}</div></div> : <p className="muted">Không thể đọc thông tin runtime.</p>}</div></section>
+        <div className="settings-modal-body">
+          <section className="panel settings-card">
+            <div className="settings-heading"><Eye className="settings-icon" /><div><h3>Cột hiển thị</h3><p>Bật hoặc tắt từng cột tùy chọn.</p></div></div>
+            <div className="settings-body settings-options">
+              {COLUMN_OPTIONS.map(([key, label, description]) => (
+                <Toggle key={key} checked={preferences.visible_columns.includes(key)} onChange={() => toggleColumn(key)} label={label} description={description} />
+              ))}
+              <div className="required-column"><span>Trạng thái</span><span className="required-chip">Luôn hiển thị</span></div>
+            </div>
+          </section>
 
-      <section className="panel settings-card"><div className="settings-heading"><Puzzle className="settings-icon" /><div><h3>Tiện ích</h3><p>Tiện ích bắt buộc luôn được bảo vệ; tiện ích tùy chọn có thể bật hoặc tắt.</p></div></div><div className="settings-body settings-options">{extensions?.required?.map((item) => <div className="extension-line" key={item.name}><div><strong>{item.display_name || item.name}</strong><span>Bắt buộc</span></div><Check className="status-check h-4 w-4" /></div>)}{extensions?.optional?.map((item) => <Toggle key={item.name} checked={item.enabled} disabled={savingExtension === item.name} onChange={(value) => toggleExtension(item.name, value)} label={item.display_name || item.name} description="Tiện ích tùy chọn cho các hồ sơ mới và lần mở tiếp theo." />)}{extensions?.quarantined?.map((item) => <div className="warning-box" key={item.name}><CircleAlert className="h-4 w-4" /><span>{item.display_name || item.name}: đã được cách ly và không được nạp.</span></div>)}{!extensions && !loading && <p className="muted">Chưa đọc được chính sách tiện ích.</p>}</div></section>
+          <section className="panel settings-card">
+            <div className="settings-heading"><Accessibility className="settings-icon" /><div><h3>Chuyển động</h3><p>Giảm các hiệu ứng trang trí trong giao diện.</p></div></div>
+            <div className="settings-body">
+              <Toggle checked={preferences.reduce_motion} onChange={(value) => onPreferenceChange({ reduce_motion: value })} label="Giảm chuyển động" description="Tắt hoặc rút ngắn chuyển cảnh và hiệu ứng không cần thiết." />
+              <p className="helper-copy settings-note">Cài đặt trợ năng giảm chuyển động của Windows cũng được tôn trọng.</p>
+            </div>
+          </section>
+
+          <section className="panel settings-card">
+            <div className="settings-heading"><Cpu className="settings-icon" /><div><h3>Trình duyệt</h3><p>Thông tin runtime được đọc an toàn, không khởi chạy Chromium.</p></div></div>
+            <div className="settings-body">
+              {loading ? <div className="loading-line"><LoaderCircle className="spin-once h-4 w-4" /> Đang kiểm tra runtime…</div> : runtime ? (
+                <div className="runtime-summary"><InfoRow label="Runtime" value={runtime.runtime_name} /><InfoRow label="Phiên bản" value={runtime.browser_version} /><div className={runtime.browser_available ? "runtime-ready" : "runtime-warning"}>{runtime.browser_available ? <Check className="h-4 w-4" /> : <CircleAlert className="h-4 w-4" />}{runtime.browser_available ? "Sẵn sàng sử dụng" : "Chưa tìm thấy browser/chrome.exe"}</div></div>
+              ) : <p className="muted">Không thể đọc thông tin runtime.</p>}
+            </div>
+          </section>
+
+          <section className="panel settings-card">
+            <div className="settings-heading"><Puzzle className="settings-icon" /><div><h3>Tiện ích</h3><p>Tiện ích bắt buộc luôn được bảo vệ; tiện ích tùy chọn áp dụng cho hồ sơ mới và lần mở tiếp theo.</p></div></div>
+            <div className="settings-body settings-options settings-extension-list">
+              {extensions?.required?.map((item) => <div className="extension-line" key={item.name}><div><strong>{item.display_name || item.name}</strong><span>Bắt buộc</span></div><Check className="status-check h-4 w-4" /></div>)}
+              {extensions?.optional?.map((item) => <Toggle key={item.name} checked={item.enabled} disabled={savingExtension === item.name} onChange={(value) => toggleExtension(item.name, value)} label={item.display_name || item.name} description="Tiện ích tùy chọn cho hồ sơ mới và lần mở tiếp theo." />)}
+              {extensions?.quarantined?.map((item) => <div className="warning-box" key={item.name}><CircleAlert className="h-4 w-4" /><span>{item.display_name || item.name}: đã được cách ly và không được nạp.</span></div>)}
+              {!extensions && !loading && <p className="muted">Chưa đọc được chính sách tiện ích.</p>}
+            </div>
+          </section>
+        </div>
+      </section>
     </div>
-  </main>;
+  );
 }
 
 function Toggle({ checked, onChange, label, description, disabled = false }) {

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Globe2, ShieldCheck } from "lucide-react";
-import { call, hasNativeBridge, waitForBridge } from "./api/bridge";
+import { BridgeNotReadyError, call, hasNativeBridge, onBridgeReady } from "./api/bridge";
 import Header from "./components/Header";
 import ProfileTable from "./components/ProfileTable";
 import RightSidebar from "./components/RightSidebar";
@@ -11,7 +10,8 @@ import ProxyCheckDialog from "./dialogs/ProxyCheckDialog";
 import SettingsPage from "./pages/SettingsPage";
 import AboutPage from "./pages/AboutPage";
 import { applyProfileDeltaToRows } from "./profileDelta";
-import { DEFAULT_PREFERENCES, normalizePreferences, readLocalPreferences, resolveTheme, writeLocalPreferences } from "./uiPreferences";
+import { launchBatchOutcome, launchPollFailureState } from "./jobOutcome";
+import { applyReduceMotionAttribute, normalizePreferences, readLocalPreferences, readLocalReduceMotionExplicit, resolveReduceMotionPreference, writeLocalPreferences } from "./uiPreferences";
 import { UI, formatCount, userError } from "./i18n";
 
 const DEMO_ROWS = [{
@@ -46,11 +46,15 @@ export default function App() {
   const [modal, setModal] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [runtime, setRuntime] = useState(null);
+  const [bridgeReady, setBridgeReady] = useState(hasNativeBridge);
   const [delay, setDelay] = useState("2");
   const [batch, setBatch] = useState(null);
   const [deleteInFlight, setDeleteInFlight] = useState(false);
-  const [activeView, setActiveView] = useState("profiles");
   const [preferences, setPreferences] = useState(readLocalPreferences);
+  const [reduceMotionExplicit, setReduceMotionExplicit] = useState(readLocalReduceMotionExplicit);
+  const reduceMotionExplicitRef = useRef(reduceMotionExplicit);
+  reduceMotionExplicitRef.current = reduceMotionExplicit;
+  const [osReduceMotion, setOsReduceMotion] = useState(() => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches || false);
   const lastErrorToast = useRef(null);
 
   const notify = useCallback((message, type = "success") => {
@@ -60,7 +64,6 @@ export default function App() {
     lastErrorToast.current = type === "error" ? key : null;
     const id = `${Date.now()}-${Math.random()}`;
     setToasts((items) => [...items, { id, message: normalized, type }]);
-    window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 4500);
   }, []);
 
   const updatePreferences = useCallback((changes) => {
@@ -69,27 +72,60 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    call("get_ui_preferences").then((saved) => { if (active && saved && Object.keys(saved).length) setPreferences((current) => normalizePreferences({ ...current, ...saved })); }).catch(() => {});
-    return () => { active = false; };
+    const unsubscribe = onBridgeReady(() => {
+      if (active) setBridgeReady(true);
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
-    const resolved = resolveTheme(preferences.theme);
-    document.documentElement.dataset.theme = resolved;
-    document.documentElement.dataset.motion = preferences.reduce_motion ? "reduced" : "full";
-    document.documentElement.style.colorScheme = resolved;
-    writeLocalPreferences(preferences);
-    const timer = window.setTimeout(() => call("save_ui_preferences", preferences).catch(() => {}), 120);
-    return () => window.clearTimeout(timer);
-  }, [preferences]);
+    if (!bridgeReady) return undefined;
+    let active = true;
+    call("get_ui_preferences").then((saved) => {
+      if (!active || !saved || !Object.keys(saved).length) return;
+      const localChoice = reduceMotionExplicitRef.current ?? readLocalReduceMotionExplicit();
+      setPreferences((current) => normalizePreferences({
+        ...current,
+        ...saved,
+        reduce_motion: localChoice === null && saved.reduce_motion !== true ? current.reduce_motion : saved.reduce_motion,
+      }));
+      if (localChoice === null && saved.reduce_motion === true) setReduceMotionExplicit(true);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [bridgeReady]);
 
   useEffect(() => {
-    if (preferences.theme !== "system" || !window.matchMedia) return undefined;
-    const media = window.matchMedia("(prefers-color-scheme: light)");
-    const update = () => { document.documentElement.dataset.theme = media.matches ? "light" : "dark"; };
-    media.addEventListener?.("change", update);
-    return () => media.removeEventListener?.("change", update);
+    const root = document.documentElement;
+    root.dataset.theme = preferences.theme;
+    root.style.colorScheme = preferences.theme;
+    const themeColor = document.querySelector('meta[name="theme-color"]');
+    if (themeColor) themeColor.content = getComputedStyle(root).getPropertyValue("--color-ink").trim();
   }, [preferences.theme]);
+
+  useEffect(() => {
+    const media = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    const updateMotion = () => setOsReduceMotion(Boolean(media?.matches));
+    updateMotion();
+    media?.addEventListener?.("change", updateMotion);
+    return () => media?.removeEventListener?.("change", updateMotion);
+  }, []);
+
+  const effectiveReduceMotion = resolveReduceMotionPreference(reduceMotionExplicit, osReduceMotion);
+
+  useEffect(() => {
+    applyReduceMotionAttribute(document.documentElement, effectiveReduceMotion);
+  }, [effectiveReduceMotion]);
+
+  useEffect(() => {
+    writeLocalPreferences(preferences, reduceMotionExplicit);
+    const timer = bridgeReady
+      ? window.setTimeout(() => call("save_ui_preferences", preferences).catch(() => {}), 120)
+      : null;
+    return () => { if (timer !== null) window.clearTimeout(timer); };
+  }, [bridgeReady, preferences, reduceMotionExplicit]);
 
   const loadProfiles = useCallback(async () => {
     setRefreshing(true);
@@ -98,8 +134,7 @@ export default function App() {
       setProfiles(rows);
       setSelected((current) => new Set([...current].filter((id) => rows.some((row) => row.profile_id === id))));
     } catch (error) {
-      if (!hasNativeBridge()) setProfiles(DEMO_ROWS);
-      else notify(userError(error), "error");
+      if (!(error instanceof BridgeNotReadyError)) notify(userError(error), "error");
     } finally { setRefreshing(false); }
   }, [notify]);
 
@@ -124,9 +159,17 @@ export default function App() {
     if (created && rows.length === created) notify(`Đã tạo ${created} hồ sơ từ dữ liệu nhập.`);
   }, [applyProfileDelta, notify]);
 
-  useEffect(() => { let active = true; waitForBridge().then(() => { if (active) loadProfiles(); }); return () => { active = false; }; }, [loadProfiles]);
+  useEffect(() => {
+    if (bridgeReady) {
+      loadProfiles();
+      return undefined;
+    }
+    if (import.meta.env.DEV && !hasNativeBridge()) setProfiles(DEMO_ROWS);
+    return undefined;
+  }, [bridgeReady, loadProfiles]);
 
   useEffect(() => {
+    if (!bridgeReady) return undefined;
     let active = true;
     const pollStatus = async () => {
       if (!hasNativeBridge()) return;
@@ -139,9 +182,11 @@ export default function App() {
     };
     const timer = window.setInterval(pollStatus, 2000);
     return () => { active = false; window.clearInterval(timer); };
-  }, []);
+  }, [bridgeReady]);
 
-  useEffect(() => { call("get_runtime_info").then(setRuntime).catch(() => {}); }, []);
+  useEffect(() => {
+    if (bridgeReady) call("get_runtime_info").then(setRuntime).catch(() => {});
+  }, [bridgeReady]);
 
   const visibleProfiles = useMemo(() => filterAndSortProfiles(profiles, query, sort), [profiles, query, sort]);
   const selectedRows = useMemo(() => profiles.filter((row) => selected.has(row.profile_id)), [profiles, selected]);
@@ -171,19 +216,41 @@ export default function App() {
 
   useEffect(() => {
     if (!batch?.jobId) return undefined;
+    let inFlight = false;
+    let terminal = false;
     const timer = window.setInterval(async () => {
+      if (inFlight || terminal) return;
+      inFlight = true;
       try {
         const state = await call("get_job", batch.jobId);
-        setBatch((current) => ({ ...current, ...state, onCancel: current?.onCancel }));
+        if (terminal) return;
+        const displayState = state.status === "completed" && Number(state.result?.failed || 0) > 0
+          ? { ...state, status: "failed" }
+          : state;
+        setBatch((current) => ({ ...current, ...displayState, onCancel: current?.onCancel }));
         if (["completed", "failed", "cancelled"].includes(state.status)) {
+          terminal = true;
           window.clearInterval(timer);
-          if (state.status === "completed") notify("Đã mở xong các hồ sơ đã chọn.");
-          if (state.status === "failed") notify("Không thể mở một số hồ sơ. Vui lòng thử lại.", "error");
-          if (state.status !== "cancelled" && state.result?.profiles?.length) applyProfileDelta(state.result.profiles);
+          if (state.status === "completed" || state.status === "failed") {
+            const outcome = launchBatchOutcome(state);
+            notify(outcome.message, outcome.type);
+          }
+          if (state.result?.profiles?.length) applyProfileDelta(state.result.profiles);
         }
-      } catch { window.clearInterval(timer); }
+      } catch (error) {
+        if (terminal) return;
+        terminal = true;
+        window.clearInterval(timer);
+        setBatch((current) => launchPollFailureState(current, batch.jobId));
+        notify(userError(error, "Không thể kiểm tra tiến trình mở hồ sơ. Hãy làm mới danh sách để kiểm tra kết quả."), "error");
+      } finally {
+        inFlight = false;
+      }
     }, 300);
-    return () => window.clearInterval(timer);
+    return () => {
+      terminal = true;
+      window.clearInterval(timer);
+    };
   }, [applyProfileDelta, batch?.jobId, notify]);
 
   const deleteSelected = async () => {
@@ -199,21 +266,24 @@ export default function App() {
     } catch (error) { notify(userError(error), "error"); } finally { setDeleteInFlight(false); }
   };
 
-  const cycleTheme = () => {
-    const order = ["system", "light", "dark"];
-    updatePreferences({ theme: order[(order.indexOf(preferences.theme) + 1) % order.length] });
-  };
+  const chooseTheme = (theme) => updatePreferences({ theme });
+  const updateSettingPreferences = useCallback((changes) => {
+    updatePreferences(changes);
+    if (Object.hasOwn(changes, "reduce_motion")) {
+      const choice = Boolean(changes.reduce_motion);
+      reduceMotionExplicitRef.current = choice;
+      setReduceMotionExplicit(choice);
+    }
+  }, [updatePreferences]);
 
   return <div className="app-shell">
-    <Header query={query} onQuery={setQuery} sort={sort} onSort={setSort} onRefresh={loadProfiles} refreshing={refreshing} activeView={activeView} onNavigate={setActiveView} theme={preferences.theme} onThemeCycle={cycleTheme} />
-    {activeView === "settings" && <SettingsPage preferences={preferences} onPreferenceChange={updatePreferences} notify={notify} />}
-    {activeView === "about" && <AboutPage notify={notify} />}
-    {activeView === "profiles" && <main className="app-main"><div className="dashboard-content"><div className="summary-grid"><Summary icon={Activity} label="Tổng hồ sơ" value={profiles.length} /><Summary icon={ShieldCheck} label="Đang mở" value={profiles.filter((row) => row.status === "Running").length} tone="mint" /><Summary icon={Globe2} label="Có Proxy" value={profiles.filter((row) => row.proxy?.enabled).length} tone="amber" /></div><ProfileTable rows={visibleProfiles} selected={selected} onToggle={toggle} onToggleAll={toggleAll} onEdit={(row) => setModal({ type: "edit", profile: row })} onOpen={launchOne} visibleColumns={preferences.visible_columns} compact={preferences.density === "compact"} /><div className="workspace-strip"><div><p className="eyebrow">Hồ sơ đang chọn</p><p className="workspace-name">{selectedProfile ? `${selectedProfile.stt} · ${selectedProfile.name}` : "Chọn một hồ sơ để xem thông tin nhanh"}</p></div>{runtime && <p className={runtime.browser_available ? "runtime-inline runtime-ready" : "runtime-inline runtime-warning"}>{runtime.browser_available ? "Runtime sẵn sàng" : "Thiếu browser/chrome.exe"}</p>}</div></div><RightSidebar selectedCount={selected.size} delay={delay} onDelay={setDelay} onLaunch={launch} onCreate={() => setModal({ type: "create" })} onImport={() => setModal({ type: "import" })} onExport={exportAccountData} onEdit={() => selectedProfile && setModal({ type: "edit", profile: selectedProfile })} onDelete={deleteSelected} deleteInFlight={deleteInFlight} onClear={() => setSelected(new Set())} onCheckProxy={() => setModal({ type: "check", profile: selectedProfile })} batch={batch} collapsed={preferences.sidebar_collapsed} /></main>}
+    <Header query={query} onQuery={setQuery} sort={sort} onSort={setSort} onRefresh={loadProfiles} refreshing={refreshing} theme={preferences.theme} onThemeChange={chooseTheme} onSettings={() => setModal({ type: "settings" })} onAbout={() => setModal({ type: "about" })} />
+    <main className="app-main"><div className="dashboard-content"><ProfileTable rows={visibleProfiles} selected={selected} onToggle={toggle} onToggleAll={toggleAll} onEdit={(row) => setModal({ type: "edit", profile: row })} onOpen={launchOne} visibleColumns={preferences.visible_columns} /><div className="workspace-strip"><div><p className="eyebrow">Hồ sơ đang chọn</p><p className="workspace-name">{selectedProfile ? `${selectedProfile.stt} · ${selectedProfile.name}` : "Chọn một hồ sơ để xem thông tin nhanh"}</p></div>{runtime && <p className={runtime.browser_available ? "runtime-inline runtime-ready" : "runtime-inline runtime-warning"}>{runtime.browser_available ? "Runtime sẵn sàng" : "Thiếu browser/chrome.exe"}</p>}</div></div><RightSidebar selectedCount={selected.size} delay={delay} onDelay={setDelay} onLaunch={launch} onCreate={() => setModal({ type: "create" })} onImport={() => setModal({ type: "import" })} onExport={exportAccountData} onEdit={() => selectedProfile && setModal({ type: "edit", profile: selectedProfile })} onDelete={deleteSelected} deleteInFlight={deleteInFlight} onClear={() => setSelected(new Set())} onCheckProxy={() => setModal({ type: "check", profile: selectedProfile })} batch={batch} profileCount={profiles.length} runningCount={profiles.filter((row) => row.status === "Running").length} proxyCount={profiles.filter((row) => row.proxy?.enabled).length} /></main>
+    {modal?.type === "settings" && <SettingsPage preferences={{ ...preferences, reduce_motion: effectiveReduceMotion }} onPreferenceChange={updateSettingPreferences} notify={notify} onClose={() => setModal(null)} />}
+    {modal?.type === "about" && <AboutPage notify={notify} onClose={() => setModal(null)} />}
     {(modal?.type === "create" || modal?.type === "edit") && <ProfileEditorModal profile={modal.profile} onClose={() => setModal(null)} onSaved={handleProfileSaved} notify={notify} />}
     {modal?.type === "import" && <BatchImportDialog onClose={() => setModal(null)} onDone={handleImportDone} notify={notify} />}
     {modal?.type === "check" && <ProxyCheckDialog profile={modal.profile} onClose={() => setModal(null)} notify={notify} />}
     <Toasts items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
   </div>;
 }
-
-function Summary({ icon: Icon, label, value, tone }) { return <div className="summary-card"><div className={`summary-icon ${tone || ""}`}><Icon className="h-4 w-4" /></div><div><p className="summary-label">{label}</p><p className="summary-value">{value}</p></div></div>; }

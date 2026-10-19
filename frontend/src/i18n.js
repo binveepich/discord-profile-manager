@@ -1,15 +1,14 @@
 export const UI = {
-  appName: "Discord Profile Manager",
+  appName: "Trình quản lý đa tài khoản Discord",
   devStatus: "Phiên bản phát triển · Pre-final",
   nav: {
     profiles: "Hồ sơ",
     settings: "Cài đặt",
-    about: "Giới thiệu",
+    about: "Thông Tin",
   },
   theme: {
     light: "Sáng",
     dark: "Tối",
-    system: "Theo hệ thống",
   },
   status: {
     Running: "Đang mở",
