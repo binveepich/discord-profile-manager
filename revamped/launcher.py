@@ -4,11 +4,13 @@ from contextlib import nullcontext
 from pathlib import Path
 import subprocess
 import sys
+import threading
 
 from .core import ProfileManagerError, checked_path
 from .environment import environment_launch_arguments, environment_runtime_notes
 from .processes import ChromiumProcessInspector
 from .proxy import proxy_launch_arguments
+from .window_placement import correct_profile_window_placement
 
 
 DISCORD_URL = "https://discord.com/app"
@@ -42,6 +44,8 @@ class ChromiumLauncher:
         process_factory=None,
         environment_argument_builder=None,
         environment_notes_builder=None,
+        window_placement_builder=None,
+        window_bounds_builder=None,
         logger=None,
     ):
         self.paths = paths
@@ -56,6 +60,8 @@ class ChromiumLauncher:
         self.environment_notes_builder = (
             environment_notes_builder or environment_runtime_notes
         )
+        self.window_placement_builder = window_placement_builder
+        self.window_bounds_builder = window_bounds_builder
         self.logger = logger or _NullLogger()
         self._processes = {}
 
@@ -73,6 +79,11 @@ class ChromiumLauncher:
             f"--user-data-dir={profile_data_dir}",
             *FIXED_ARGUMENTS,
             *self.build_environment_arguments(profile_record),
+            *(
+                self.window_placement_builder(profile_id)
+                if self.window_placement_builder is not None
+                else ()
+            ),
             *self.build_proxy_arguments(profile_record),
             DISCORD_URL,
         ]
@@ -146,11 +157,44 @@ class ChromiumLauncher:
                     )
                 self._processes[profile_id] = process
                 self.profile_service.mark_profile_opened(profile_id)
+                self._schedule_window_correction(profile_id, profile_data_dir, process)
                 return True
             except ProfileManagerError:
                 raise
             except OSError as error:
                 raise ProfileManagerError(f"Cannot launch Chromium: {error}") from error
+
+    def _schedule_window_correction(self, profile_id, profile_data_dir, process):
+        """Correct Chromium's restored bounds only for product-owned launches."""
+        if (
+            sys.platform != "win32"
+            or self.window_bounds_builder is None
+            or self.window_placement_builder is None
+        ):
+            return
+        try:
+            # A missing work area deliberately produces no placement flags;
+            # don't replace that safe behavior with a hard-coded correction.
+            if not self.window_placement_builder(profile_id):
+                return
+            bounds = self.window_bounds_builder(profile_id)
+            if not isinstance(bounds, dict):
+                return
+            if not isinstance(getattr(process, "pid", None), int):
+                return
+        except (OSError, TypeError, ValueError):
+            return
+        threading.Thread(
+            target=correct_profile_window_placement,
+            kwargs={
+                "process_inspector": self.process_inspector,
+                "profile_data_dir": profile_data_dir,
+                "process": process,
+                "bounds": bounds,
+            },
+            name=f"dpm-window-placement-{profile_id}",
+            daemon=True,
+        ).start()
 
     def close_profile(self, profile_id, timeout=2.0):
         """Close a Chromium process started by this launcher, when owned.

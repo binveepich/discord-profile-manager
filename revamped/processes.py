@@ -113,4 +113,39 @@ class ChromiumProcessInspector:
             ) from error
         return found
 
+    def process_ids_for_directory(self, directory):
+        """Return Chromium PIDs whose command line owns one profile root.
+
+        This narrow identity seam is used only for DPM-owned post-launch
+        window correction. It intentionally matches the exact
+        ``--user-data-dir`` path so unrelated Chromium windows are ignored.
+        """
+        target = Path(directory).resolve()
+        found = set()
+        try:
+            for process in self.process_iter(["name"]):
+                if (process.info.get("name") or "").lower() not in CHROMIUM_PROCESS_NAMES:
+                    continue
+                try:
+                    args = process.cmdline()
+                    value = _argument_user_data_dir(args)
+                    if value and _candidate_directory(value, process) == target:
+                        try:
+                            found.add(int(process.pid))
+                        except (AttributeError, TypeError, ValueError):
+                            continue
+                except self.psutil.NoSuchProcess:
+                    continue
+                except (self.psutil.AccessDenied, OSError) as error:
+                    raise ProfileManagerError(
+                        "Cannot identify the Chromium process for this profile."
+                    ) from error
+        except ProfileManagerError:
+            raise
+        except (self.psutil.Error, OSError) as error:
+            raise ProfileManagerError(
+                "Cannot inspect Chromium processes for this profile."
+            ) from error
+        return found
+
     __call__ = using_directory

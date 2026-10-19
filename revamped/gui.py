@@ -827,7 +827,7 @@ class TkRevampedApp:
 
     def _window_title(self):
         if self._workspace_kind() == "product":
-            return "Discord Profile Manager — PRODUCT"
+            return "Trình quản lý đa tài khoản discord"
         return self.TITLE
 
     def _workspace_banner(self):

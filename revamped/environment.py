@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 DEFAULT_ENVIRONMENT_PRESET = "default"
+ENVIRONMENT_AUTO = "auto"
 ENVIRONMENT_DESKTOP = "desktop"
 ENVIRONMENT_DEFAULT_DESKTOP = "default_desktop"
 # Kept only so saved pre-R11 records keep their former launch behaviour.
@@ -29,6 +30,7 @@ ENVIRONMENT_ANDROID_CHROMIUM = "android_chromium"
 ENVIRONMENT_CUSTOM = "custom"
 ENVIRONMENT_GENERATED = "generated"
 SUPPORTED_ENVIRONMENT_PRESETS = (
+    ENVIRONMENT_AUTO,
     ENVIRONMENT_DESKTOP,
     ENVIRONMENT_DEFAULT_DESKTOP,
     ENVIRONMENT_MOBILE,
@@ -39,6 +41,7 @@ SUPPORTED_ENVIRONMENT_PRESETS = (
     ENVIRONMENT_GENERATED,
 )
 RUNTIME_ENVIRONMENT_PRESETS = (
+    ENVIRONMENT_AUTO,
     ENVIRONMENT_DESKTOP,
     ENVIRONMENT_WINDOWS_CHROMIUM,
     ENVIRONMENT_LINUX_CHROMIUM,
@@ -47,6 +50,7 @@ RUNTIME_ENVIRONMENT_PRESETS = (
     ENVIRONMENT_GENERATED,
 )
 PRESET_LABELS = {
+    ENVIRONMENT_AUTO: "Auto",
     ENVIRONMENT_DESKTOP: "Default Desktop",
     ENVIRONMENT_DEFAULT_DESKTOP: "Default Desktop",
     ENVIRONMENT_WINDOWS_CHROMIUM: "Windows Chromium",
@@ -95,8 +99,6 @@ CHROMIUM_VERSION = _CHROMIUM_VERSION
 PRODUCT_ENVIRONMENT_SCHEMA = "product-environment-v1"
 PRODUCT_WINDOW_MARGIN = 24
 PRODUCT_WINDOW_GAP = 16
-PRODUCT_WINDOW_MIN_WIDTH = 720
-PRODUCT_WINDOW_MIN_HEIGHT = 600
 PRODUCT_FALLBACK_WORK_AREA = (0, 0, 1920, 1040)
 
 # Windows reports time zones by Windows key name while Python/Chromium-facing
@@ -312,6 +314,8 @@ def _preset_key(value):
 def normalize_environment_preset(value):
     """Return a supported preset name, safely falling back to Desktop."""
     normalized = _preset_key(value)
+    if normalized == ENVIRONMENT_AUTO:
+        return ENVIRONMENT_AUTO
     if normalized in ("", DEFAULT_ENVIRONMENT_PRESET, ENVIRONMENT_DESKTOP):
         return ENVIRONMENT_DESKTOP
     if normalized == "default-desktop":
@@ -603,6 +607,9 @@ def get_windows_work_area():
                     "left": int(rect.left), "top": int(rect.top),
                     "right": int(rect.right), "bottom": int(rect.bottom),
                 }
+        # Do not fall back to full physical screen metrics: that can place a
+        # window beneath the taskbar. Callers that cannot obtain the work area
+        # must skip placement rather than guess.
     except (AttributeError, OSError):
         return None
     return None
@@ -623,8 +630,37 @@ def _normalize_work_area(value):
     return left, top, right, bottom
 
 
+def profile_id_numeric_suffix(profile_id):
+    """Return a trailing numeric suffix, or ``None`` if the ID has none."""
+    match = re.search(r"(\d+)$", "" if profile_id is None else str(profile_id))
+    if not match:
+        return None
+    try:
+        number = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return number
+
+
+def profile_window_slot(profile_id):
+    """Return the stable side for a profile ID: odd IDs left, even IDs right.
+
+    Nonstandard or malformed IDs safely fall back to the left side. Display
+    ordering, saved environment metadata, and the mutable table STT are not
+    inputs to this decision.
+    """
+    number = profile_id_numeric_suffix(profile_id)
+    if number is None:
+        return 0
+    return (number - 1) % 2
+
+
 def product_window_bounds(profile_id=None, *, work_area=None, slot=None):
-    """Calculate one bounded, desktop-usable two-column Chromium rectangle."""
+    """Calculate an on-screen half-work-area Chromium rectangle.
+
+    ``slot`` remains an ignored compatibility argument. Placement always
+    follows the stable numeric suffix of ``profile_id``.
+    """
     left, top, right, bottom = (
         _normalize_work_area(work_area)
         or _normalize_work_area(get_windows_work_area())
@@ -632,31 +668,44 @@ def product_window_bounds(profile_id=None, *, work_area=None, slot=None):
     )
     total_width = right - left
     total_height = bottom - top
-    margin_x = min(PRODUCT_WINDOW_MARGIN, max(8, total_width // 12))
-    margin_y = min(PRODUCT_WINDOW_MARGIN, max(8, total_height // 12))
-    gap = min(PRODUCT_WINDOW_GAP, max(4, total_width // 24))
+    margin_x = min(PRODUCT_WINDOW_MARGIN, max(0, total_width // 12))
+    margin_y = min(PRODUCT_WINDOW_MARGIN, max(0, total_height // 12))
+    gap = min(PRODUCT_WINDOW_GAP, max(0, total_width // 24))
     usable_width = max(1, total_width - (2 * margin_x) - gap)
     usable_height = max(1, total_height - (2 * margin_y))
-    width = min(usable_width, max(min(PRODUCT_WINDOW_MIN_WIDTH, usable_width), usable_width // 2))
-    height = min(usable_height, max(min(PRODUCT_WINDOW_MIN_HEIGHT, usable_height), usable_height))
-
-    if not isinstance(slot, int) or isinstance(slot, bool):
-        seed = str(profile_id or "product-profile")
-        match = re.search(r"(?:^|[_-])(\d+)$", seed)
-        if match:
-            slot = (int(match.group(1)) - 1) % 2
-        else:
-            slot = sha256(seed.encode("utf-8")).digest()[0] % 2
-    slot = 0 if slot % 2 == 0 else 1
-    requested_left = left + margin_x + (slot * (width + gap))
-    maximum_left = max(left, right - margin_x - width)
-    x = max(left, min(requested_left, maximum_left))
-    y = max(top, min(top + margin_y, max(top, bottom - margin_y - height)))
+    slot = profile_window_slot(profile_id)
+    left_width = max(1, usable_width // 2)
+    right_width = max(1, usable_width - left_width)
+    width = left_width if slot == 0 else right_width
+    requested_left = (
+        left + margin_x
+        if slot == 0
+        else left + margin_x + left_width + gap
+    )
+    x = min(max(left, requested_left), max(left, right - width))
+    y = min(max(top, top + margin_y), max(top, bottom - margin_y - usable_height))
+    height = min(usable_height, max(1, bottom - y))
     return {
         "x": int(x), "y": int(y), "width": int(width), "height": int(height),
         "slot": slot,
         "work_area": {"left": left, "top": top, "right": right, "bottom": bottom},
     }
+
+
+def product_window_placement_arguments(profile_id, *, work_area=None):
+    """Build only the global left/right window-placement flags for a profile."""
+    target_area = _normalize_work_area(work_area) or _normalize_work_area(
+        get_windows_work_area()
+    )
+    if target_area is None and sys.platform == "win32":
+        # Leave placement to Chromium if Windows cannot report any display
+        # geometry; never pass hard-coded bounds that may be off-screen.
+        return []
+    bounds = product_window_bounds(profile_id, work_area=target_area)
+    return [
+        f"--window-size={bounds['width']},{bounds['height']}",
+        f"--window-position={bounds['x']},{bounds['y']}",
+    ]
 
 
 def normalize_viewport_dimension(value, minimum, maximum):
@@ -844,6 +893,8 @@ def _resolve_window_policy(config, default_policy=None):
 def product_environment_preset(value):
     """Map the compact product UI labels onto truthful Chromium families."""
     normalized = normalize_environment_preset(value)
+    if normalized == ENVIRONMENT_AUTO:
+        return ENVIRONMENT_AUTO
     if normalized in (ENVIRONMENT_DESKTOP, ENVIRONMENT_DEFAULT_DESKTOP, ENVIRONMENT_WINDOWS_CHROMIUM):
         return ENVIRONMENT_WINDOWS_CHROMIUM
     if normalized in (ENVIRONMENT_MOBILE, ENVIRONMENT_ANDROID_CHROMIUM):
@@ -1058,6 +1109,9 @@ def materialize_environment_config(
     normalized_config = normalize_environment_config(config) or {}
     existing = normalize_environment_config(existing_config) or {}
 
+    if normalized_preset == ENVIRONMENT_AUTO:
+        return None
+
     # Product-candidate configuration is intentionally self-contained.  Do
     # not hydrate it with the legacy viewport/DPR defaults: product launch
     # geometry is calculated from the current Windows work area instead.
@@ -1109,6 +1163,8 @@ def effective_environment(record):
     """Return a normalized, non-mutating environment for one metadata record."""
     record = record if isinstance(record, dict) else {}
     preset = normalize_environment_preset(record.get("environment_preset"))
+    if preset == ENVIRONMENT_AUTO:
+        return preset, {}
     raw_config = record.get("environment_config")
     product_config = normalize_environment_config(raw_config)
     if product_config and product_config.get("environment_schema") == PRODUCT_ENVIRONMENT_SCHEMA:
@@ -1297,9 +1353,7 @@ def product_environment_details(record, *, work_area=None):
     config.pop("viewport_width", None)
     config.pop("viewport_height", None)
     config.pop("window_size_policy", None)
-    bounds = product_window_bounds(
-        record.get("profile_id"), work_area=work_area, slot=config.get("window_slot")
-    )
+    bounds = product_window_bounds(record.get("profile_id"), work_area=work_area)
     field_sources = {
         "user_agent": config.get("user_agent_source") or "applied to Chromium",
         "language": config.get("language_source") or "applied to Chromium",
@@ -1346,11 +1400,9 @@ def product_environment_launch_arguments(record):
     values safely but never forwards them to Chromium.
     """
     details = product_environment_details(record)
-    bounds = details["window_geometry"]
-    arguments = [
-        f"--window-size={bounds['width']},{bounds['height']}",
-        f"--window-position={bounds['x']},{bounds['y']}",
-    ]
+    if details.get("preset") == ENVIRONMENT_AUTO:
+        return []
+    arguments = []
     language = normalize_locale(details.get("language"))
     if language:
         arguments.append(f"--lang={language}")
@@ -1367,6 +1419,8 @@ def product_environment_launch_arguments(record):
 def product_environment_runtime_notes(record):
     """State product limitations without claiming unsupported spoofing."""
     details = product_environment_details(record)
+    if details.get("preset") == ENVIRONMENT_AUTO:
+        return ["Auto leaves browser environment and window defaults to Chromium and Windows."]
     notes = [
         "Chromium window bounds are calculated from the current Windows work area.",
         "Device scale is left to normal Windows/Chromium desktop scaling.",

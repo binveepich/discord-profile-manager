@@ -2,19 +2,23 @@
 
 import argparse
 import logging
+import threading
 from pathlib import Path
 
 from .main import PROJECT_ROOT, compose_product_candidate
 from .product_api import ProductAPI
+from .window_constraints import MIN_WINDOW_SIZE, install_aspect_ratio_constraint, remove_aspect_ratio_constraint
 
 
 FRONTEND_INDEX = PROJECT_ROOT / "frontend" / "dist" / "index.html"
 PRODUCT_WINDOW_WIDTH = 1600
 PRODUCT_WINDOW_HEIGHT = 900
+PRODUCT_WINDOW_MIN_SIZE = MIN_WINDOW_SIZE
+PRODUCT_DISPLAY_NAME = "Trình quản lý đa tài khoản Discord"
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Discord Profile Manager product candidate")
+    parser = argparse.ArgumentParser(description=PRODUCT_DISPLAY_NAME)
     parser.add_argument(
         "--root",
         default=str(PROJECT_ROOT),
@@ -31,7 +35,7 @@ def main(argv=None):
     composition.profile_service.initialize_metadata()
     api = ProductAPI(composition)
     if args.no_gui:
-        print(f"Discord Profile Manager product candidate ready: {root}")
+        print(f"{PRODUCT_DISPLAY_NAME} ready: {root}")
         print(f"Profiles: {len(api.list_profiles())}")
         print(f"Runtime: {api.get_runtime_info()['browser_version']}")
         api.shutdown()
@@ -49,17 +53,56 @@ def main(argv=None):
             "pywebview is not installed. Install requirements.txt, then run this command again."
         ) from error
 
+    window = None
+    constraints_lock = threading.Lock()
+    closing_started = threading.Event()
+
+    def remove_native_constraints_before_disposal(*_args, **_kwargs):
+        # pywebview's WinForms closing event runs synchronously in FormClosing,
+        # before FormClosed disposes the native Form. Return True so this
+        # cleanup callback never cancels the user's close request.
+        closing_started.set()
+        with constraints_lock:
+            remove_aspect_ratio_constraint(window)
+        return True
+
     try:
-        webview.create_window(
-            "Discord Profile Manager",
-            FRONTEND_INDEX.as_uri(),
+        window = webview.create_window(
+            PRODUCT_DISPLAY_NAME,
+            str(FRONTEND_INDEX.resolve()),
             js_api=api,
             width=PRODUCT_WINDOW_WIDTH,
             height=PRODUCT_WINDOW_HEIGHT,
-            resizable=False,
+            x=None,
+            y=None,
+            resizable=True,
+            fullscreen=False,
+            maximized=False,
+            min_size=PRODUCT_WINDOW_MIN_SIZE,
         )
-        webview.start(debug=False)
+        window.events.closing += remove_native_constraints_before_disposal
+
+        def install_native_constraints():
+            # pywebview exposes the native WinForms handle only after its
+            # shown event. Serialize installation with FormClosing so a
+            # late startup callback cannot subclass a closing/disposed Form.
+            if window is not None and window.events.shown.wait(10):
+                with constraints_lock:
+                    if not closing_started.is_set():
+                        install_aspect_ratio_constraint(
+                            window,
+                            min_size=PRODUCT_WINDOW_MIN_SIZE,
+                        )
+
+        # Serve the Vite ES-module build over pywebview's local HTTP server.
+        # Loading it as file:// can prevent WebView2 from loading module assets.
+        webview.start(
+            func=install_native_constraints,
+            debug=False,
+            http_server=True,
+        )
     finally:
+        remove_native_constraints_before_disposal()
         api.shutdown()
     return 0
 

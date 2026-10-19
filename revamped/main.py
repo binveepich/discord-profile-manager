@@ -218,6 +218,8 @@ def compose_product_candidate(product_root=None, *, logger=None, process_inspect
         process_factory=process_factory,
         environment_argument_builder=environment.product_environment_launch_arguments,
         environment_notes_builder=environment.product_environment_runtime_notes,
+        window_placement_builder=environment.product_window_placement_arguments,
+        window_bounds_builder=environment.product_window_bounds,
         logger=log,
     )
     controller = ProfileGUIController(

@@ -15,10 +15,11 @@ import subprocess
 import threading
 import time
 import uuid
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import (
     HTTPBasicAuthHandler,
     HTTPPasswordMgrWithDefaultRealm,
@@ -39,6 +40,8 @@ _SECRET_WORDS = (
     "password", "totp", "secret", "token", "cookie", "session",
     "credential", "authorization",
 )
+
+CONTRIBUTOR_NAME = "merino sầu riêng"
 
 
 EXPORT_COLUMNS = (
@@ -99,15 +102,22 @@ def _json_safe(value, *, drop_sensitive=True):
 class JobManager:
     """Small thread-backed job registry for bridge-safe long operations."""
 
+    MAX_RETAINED_JOBS = 256
+
     def __init__(self, max_workers=2):
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._lock = threading.RLock()
         self._jobs = {}
+        self._shutdown = False
+        self._shutdown_complete = threading.Event()
 
     def start(self, label, worker, initial_progress=None):
         job_id = uuid.uuid4().hex
         cancel_event = threading.Event()
         with self._lock:
+            if self._shutdown:
+                raise ProfileManagerError("Background jobs are shut down.")
+            self._prune_terminal_locked()
             self._jobs[job_id] = {
                 "job_id": job_id,
                 "label": str(label),
@@ -122,11 +132,21 @@ class JobManager:
                 "cancel_requested": False,
                 "_cancel_event": cancel_event,
             }
-        self._executor.submit(self._run, job_id, worker, cancel_event)
+            # A worker may start immediately; _run waits for this registry lock
+            # before it changes the newly-created job's state.
+            self._executor.submit(self._run, job_id, worker, cancel_event)
         return job_id
 
     def _run(self, job_id, worker, cancel_event):
-        self._set(job_id, status="running")
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if (
+                job is None
+                or job["status"] != "queued"
+                or cancel_event.is_set()
+            ):
+                return
+            job["status"] = "running"
 
         def progress(value):
             if isinstance(value, dict):
@@ -144,6 +164,20 @@ class JobManager:
             job = self._jobs.get(job_id)
             if job is not None:
                 job.update(changes)
+                if changes.get("status") not in {None, "queued", "running"}:
+                    self._prune_terminal_locked()
+
+    def _prune_terminal_locked(self):
+        terminal = [
+            job_id for job_id, job in self._jobs.items()
+            if job["status"] not in {"queued", "running"}
+        ]
+        excess = len(terminal) - self.MAX_RETAINED_JOBS
+        for job_id in terminal:
+            if excess <= 0:
+                break
+            self._jobs.pop(job_id, None)
+            excess -= 1
 
     def get(self, job_id):
         with self._lock:
@@ -165,10 +199,34 @@ class JobManager:
             job["_cancel_event"].set()
             if job["status"] == "queued":
                 job["status"] = "cancelled"
+                self._prune_terminal_locked()
             return self.get(job_id)
 
     def shutdown(self):
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        with self._lock:
+            if self._shutdown:
+                wait_for_existing_shutdown = True
+            else:
+                wait_for_existing_shutdown = False
+                self._shutdown = True
+                for job in self._jobs.values():
+                    if job["status"] not in {"queued", "running"}:
+                        continue
+                    job["cancel_requested"] = True
+                    job["_cancel_event"].set()
+                    if job["status"] == "queued":
+                        job["status"] = "cancelled"
+                self._prune_terminal_locked()
+        if wait_for_existing_shutdown:
+            self._shutdown_complete.wait()
+            return
+        try:
+            # Mutating workers cooperate with their cancellation event and
+            # finish the current atomic item before shutdown returns. This
+            # prevents hidden profile writes after the UI has closed.
+            self._executor.shutdown(wait=True, cancel_futures=True)
+        finally:
+            self._shutdown_complete.set()
 
 
 class ProxyDiagnostics:
@@ -422,12 +480,13 @@ class ProductAPI:
                 "window_height": product_details["window_geometry"]["height"],
             }
         label = {
+            environment.ENVIRONMENT_AUTO: "Auto",
             environment.ENVIRONMENT_DESKTOP: "Desktop",
             environment.ENVIRONMENT_DEFAULT_DESKTOP: "Desktop",
             environment.ENVIRONMENT_WINDOWS_CHROMIUM: "Desktop",
             environment.ENVIRONMENT_ANDROID_CHROMIUM: "Mobile",
             environment.ENVIRONMENT_CUSTOM: "Custom",
-            environment.ENVIRONMENT_GENERATED: "Generated",
+            environment.ENVIRONMENT_GENERATED: "Auto",
         }.get(preset, environment.preset_label(preset))
         result = {
             "preset": preset,
@@ -613,8 +672,21 @@ class ProductAPI:
         allowed = {"enabled", "scheme", "host", "port", "username", "password", "authenticated", "raw"}
         if any(key not in allowed for key in value):
             raise proxy.ProxyValidationError("Proxy settings contain an unsupported field.")
-        result = {key: value[key] for key in ("enabled", "scheme", "host", "port", "username", "password") if key in value}
-        result.setdefault("enabled", True)
+        enabled = value.get("enabled", True)
+        if enabled is False:
+            return {"enabled": False}
+        if enabled is not True:
+            raise proxy.ProxyValidationError("Proxy state must be Enabled or Off.")
+        normalized = proxy.normalize_proxy_config(
+            value.get("scheme"), value.get("host"), value.get("port")
+        )
+        if normalized is None:
+            raise proxy.ProxyValidationError("Proxy configuration is incomplete or invalid.")
+        result = {"enabled": True, **normalized}
+        if "username" in value or "password" in value:
+            result.update(proxy.normalize_proxy_credentials(
+                value.get("username"), value.get("password")
+            ))
         return result
 
     @staticmethod
@@ -627,11 +699,11 @@ class ProductAPI:
 
     def _persist_product_environment(
         self, profile_id, payload=None, *, force_generate=False, creating=False,
-        system_settings=None,
+        system_settings=None, proxy_payload=None,
     ):
         """Persist a truthful product environment without invoking Chromium."""
-        request = self._environment_request(payload or {"preset": "Desktop"})
-        preset = request.get("preset", request.get("environment_preset", "Desktop"))
+        request = self._environment_request(payload or {"preset": "Auto"})
+        preset = request.get("preset", request.get("environment_preset", "Auto"))
         normalized = environment.normalize_environment_preset(preset)
         record = self.profile_service.get_profile_record(profile_id)
         previous = environment.normalize_environment_config(
@@ -646,7 +718,10 @@ class ProductAPI:
         }
 
         should_generate = creating or force_generate or not previous_product
-        if normalized == environment.ENVIRONMENT_CUSTOM:
+        if normalized == environment.ENVIRONMENT_AUTO:
+            generated = None
+            target_preset = environment.ENVIRONMENT_AUTO
+        elif normalized == environment.ENVIRONMENT_CUSTOM:
             should_generate = should_generate or bool(meaningful_fields)
             if should_generate:
                 generated = environment.product_custom_environment(
@@ -676,20 +751,25 @@ class ProductAPI:
             profile_id,
             target_preset,
             generated,
-            proxy_config=None,
+            proxy_config=proxy_payload,
         )
         return generated
 
     def _apply_options(self, profile_id, *, environment_payload=None, proxy_payload=None):
+        normalized_proxy = self._proxy_payload(proxy_payload)
         if environment_payload is not None:
-            self._persist_product_environment(profile_id, environment_payload)
-        if proxy_payload is not None:
+            self._persist_product_environment(
+                profile_id,
+                environment_payload,
+                proxy_payload=normalized_proxy,
+            )
+        elif normalized_proxy is not None:
             current = self.profile_service.get_profile_record(profile_id)
             self.profile_service.save_runtime_settings(
                 profile_id,
                 current.get("environment_preset", "Desktop"),
                 current.get("environment_config"),
-                proxy_config=proxy_payload,
+                proxy_config=normalized_proxy,
             )
 
     def _create_profile_internal(
@@ -716,7 +796,7 @@ class ProductAPI:
                 )
             self._persist_product_environment(
                 profile_id,
-                environment_payload or {"preset": "Desktop"},
+                environment_payload or {"preset": "Auto"},
                 creating=True,
                 system_settings=system_settings,
             )
@@ -748,17 +828,32 @@ class ProductAPI:
 
     def update_profile(self, profile_id, name=None, account_input=None, remove_account=False,
                        environment_payload=None, proxy_payload=None):
+        parsed_account = (
+            parse_account_input(account_input)
+            if account_input is not None and not remove_account
+            else None
+        )
+        normalized_proxy = self._proxy_payload(proxy_payload)
+        if environment_payload is not None:
+            request = self._environment_request(environment_payload)
+            environment.normalize_environment_preset(
+                request.get("preset", request.get("environment_preset", "Auto"))
+            )
         if name is not None:
             self.profile_service.rename_profile(profile_id, name)
         if remove_account:
             self._remove_account(profile_id)
         elif account_input is not None:
-            self._set_credential_account(profile_id, account_input)
+            self._set_credential_account(
+                profile_id,
+                account_input,
+                parsed_account=parsed_account,
+            )
         if environment_payload is not None or proxy_payload is not None:
             self._apply_options(
                 profile_id,
                 environment_payload=environment_payload,
-                proxy_payload=self._proxy_payload(proxy_payload) if proxy_payload is not None else None,
+                proxy_payload=normalized_proxy,
             )
         return self.get_profile(profile_id)
 
@@ -848,6 +943,7 @@ class ProductAPI:
         def worker(cancel_event, progress):
             results = []
             opened_profile_ids = []
+            failed = 0
             total = len(profile_ids)
             for index, profile_id in enumerate(profile_ids):
                 if cancel_event.is_set():
@@ -861,6 +957,7 @@ class ProductAPI:
                     if started:
                         opened_profile_ids.append(profile_id)
                 except Exception as error:
+                    failed += 1
                     results.append({
                         "profile_id": profile_id,
                         "status": "error",
@@ -875,6 +972,8 @@ class ProductAPI:
             return {
                 "requested": total,
                 "completed": len(results),
+                "succeeded": len(results) - failed,
+                "failed": failed,
                 "cancelled": cancel_event.is_set(),
                 "results": results,
                 "profiles": self._summaries_for_ids(opened_profile_ids),
@@ -976,7 +1075,7 @@ class ProductAPI:
                                 record["raw"],
                                 parsed_account=parsed,
                                 environment_payload={
-                                    "preset": environment.ENVIRONMENT_GENERATED
+                                    "preset": environment.ENVIRONMENT_AUTO
                                 },
                                 extension_sources=batch_context["extension_sources"],
                                 system_settings=batch_context["system_settings"],
@@ -1219,7 +1318,10 @@ class ProductAPI:
 
     def generate_environment(self, profile_id, preset="Desktop", custom=None):
         key = re.sub(r"[\s_/-]+", "-", str(preset or "Desktop").strip().casefold())
-        if key in {"desktop", "default", "windows", "windows-chromium"}:
+        if key == "auto":
+            target = environment.ENVIRONMENT_AUTO
+            label = "Auto"
+        elif key in {"desktop", "default", "windows", "windows-chromium"}:
             target = environment.ENVIRONMENT_WINDOWS_CHROMIUM
             label = "Desktop"
         elif key in {"mobile", "android", "android-chromium"}:
@@ -1232,7 +1334,7 @@ class ProductAPI:
             target = environment.ENVIRONMENT_GENERATED
             label = "Generated"
         else:
-            raise ProfileManagerError("Environment must be Desktop, Mobile, Custom, or Generated.")
+            raise ProfileManagerError("Environment must be Auto, Desktop, Mobile, Custom, or Generated.")
         payload = {"preset": target}
         if target == environment.ENVIRONMENT_CUSTOM and isinstance(custom, dict):
             payload.update(custom)
@@ -1289,10 +1391,24 @@ class ProductAPI:
             return {}
         if not isinstance(payload, dict):
             return {}
-        allowed = {"theme", "density", "reduce_motion", "sidebar_collapsed", "visible_columns"}
-        result = {key: payload[key] for key in allowed if key in payload}
-        if isinstance(result.get("visible_columns"), list):
-            result["visible_columns"] = [str(value) for value in result["visible_columns"][:4]]
+        allowed_columns = {"account", "environment", "last_opened"}
+        raw_columns = payload.get("visible_columns")
+        visible = (
+            [value for value in dict.fromkeys(map(str, raw_columns)) if value in allowed_columns]
+            if isinstance(raw_columns, list)
+            else ["account", "environment", "last_opened"]
+        )
+        saved_theme = str(payload.get("theme", "dark")).casefold()
+        # Older product builds persisted `system`. Keep those files readable
+        # without exposing a non-deterministic third appearance mode.
+        theme = "dark" if saved_theme == "system" else saved_theme
+        if theme not in {"light", "dark"}:
+            theme = "dark"
+        result = {
+            "theme": theme,
+            "reduce_motion": bool(payload.get("reduce_motion", False)),
+            "visible_columns": visible,
+        }
         return _json_safe(result)
 
     def save_ui_preferences(self, preferences):
@@ -1300,22 +1416,18 @@ class ProductAPI:
         if not isinstance(preferences, dict):
             raise ProfileManagerError("UI preferences must be an object.")
         themes = {"light", "dark", "system"}
-        densities = {"comfortable", "compact"}
-        columns = {"account", "environment", "status", "last_opened"}
-        theme = str(preferences.get("theme", "system"))
-        density = str(preferences.get("density", "comfortable"))
+        columns = {"account", "environment", "last_opened"}
+        theme = str(preferences.get("theme", "dark")).casefold()
+        if theme == "system":
+            theme = "dark"
         visible = preferences.get("visible_columns", sorted(columns))
-        if theme not in themes or density not in densities or not isinstance(visible, list):
+        if theme not in themes or not isinstance(visible, list):
             raise ProfileManagerError("UI preferences contain an unsupported value.")
         normalized = {
             "theme": theme,
-            "density": density,
             "reduce_motion": bool(preferences.get("reduce_motion", False)),
-            "sidebar_collapsed": bool(preferences.get("sidebar_collapsed", False)),
             "visible_columns": [value for value in dict.fromkeys(map(str, visible)) if value in columns],
         }
-        if not normalized["visible_columns"]:
-            normalized["visible_columns"] = sorted(columns)
         path = self.profile_service.paths.ui_preferences_json
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -1340,7 +1452,8 @@ class ProductAPI:
             try:
                 result = subprocess.run(
                     ["git", *arguments], cwd=root, capture_output=True,
-                    text=True, timeout=2, check=False,
+                    text=True, encoding="utf-8", errors="replace",
+                    timeout=2, check=False,
                 )
             except (OSError, subprocess.SubprocessError):
                 return ""
@@ -1357,18 +1470,56 @@ class ProductAPI:
         if "@" in remote.split("://")[-1].split("/")[0]:
             scheme, remainder = remote.split("://", 1)
             remote = f"{scheme}://{remainder.split('@', 1)[-1]}"
-        authors = git("log", "--format=%aN", "--all").splitlines()
-        contributors = list(dict.fromkeys(name.strip() for name in authors if name.strip()))[:20]
+        developer_url = None
+        try:
+            metadata = json.loads(
+                (root / "revamped" / "resources" / "about.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            candidate = None
+            if isinstance(metadata, dict):
+                candidate = metadata.get("developer_profile_url")
+                if not candidate:
+                    # Keep reading project metadata created by the earlier
+                    # contributor-only About implementation.
+                    candidate = metadata.get("contributor_github_url")
+            if isinstance(candidate, str):
+                candidate = candidate.strip()
+                parsed = urlparse(candidate)
+                if (
+                    parsed.scheme == "https"
+                    and parsed.hostname
+                    and parsed.username is None
+                    and parsed.password is None
+                ):
+                    developer_url = candidate
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            pass
         return _json_safe({
-            "name": "Discord Profile Manager",
+            "name": "Trình quản lý đa tài khoản Discord",
             "status": "Phiên bản phát triển — Pre-final",
             "commit": git("rev-parse", "--short", "HEAD") or "local",
             "branch": git("branch", "--show-current") or "không xác định",
             "repository": remote or None,
-            "contributors": contributors,
+            "contributors": [CONTRIBUTOR_NAME],
+            "developer_profile_url": developer_url,
+            # Keep the old field available for any already-built frontend.
+            "contributor_github_url": developer_url,
             "license": "LICENSE" if (root / "LICENSE").is_file() else "Chưa xác định",
             "stack": ["Python", "pywebview", "React", "Vite", "Tailwind CSS"],
         })
+
+    def open_developer_profile(self):
+        """Open the configured developer profile in the system default browser."""
+        url = self.get_about_info().get("developer_profile_url")
+        if not url:
+            return {"opened": False, "configured": False}
+        return {"opened": bool(webbrowser.open(url, new=2)), "configured": True}
+
+    def open_contributor_github(self):
+        """Compatibility alias for clients using the older About action."""
+        return self.open_developer_profile()
 
     def set_optional_extension_policy(self, extension_name, enabled):
         if enabled is not True and enabled is not False:
