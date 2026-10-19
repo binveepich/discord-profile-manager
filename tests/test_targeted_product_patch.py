@@ -8,7 +8,7 @@ import unittest
 from compatibility.fixtures import DisposableWorkspace
 from revamped.main import compose_product_candidate
 from revamped.product_api import ProductAPI
-from revamped.product_main import PRODUCT_WINDOW_HEIGHT, PRODUCT_WINDOW_WIDTH
+from revamped.product_main import PRODUCT_DISPLAY_NAME, PRODUCT_WINDOW_HEIGHT, PRODUCT_WINDOW_MIN_SIZE, PRODUCT_WINDOW_WIDTH
 
 
 class DynamicInspector:
@@ -33,12 +33,29 @@ class TargetedProductPatchTests(unittest.TestCase):
         self.api = ProductAPI(self.application)
         self.addCleanup(self.api.shutdown)
 
-    def test_fixed_window_and_shell_scroll_contract(self):
+    def test_product_window_is_resizable_and_shell_supports_narrow_layouts(self):
         self.assertEqual((PRODUCT_WINDOW_WIDTH, PRODUCT_WINDOW_HEIGHT), (1600, 900))
+        self.assertEqual(PRODUCT_WINDOW_MIN_SIZE, (1312, 738))
+        self.assertEqual(PRODUCT_DISPLAY_NAME, "Trình quản lý đa tài khoản Discord")
+        product_entrypoint = Path("revamped/product_main.py").read_text(encoding="utf-8")
+        self.assertIn("resizable=True", product_entrypoint)
+        self.assertIn("x=None", product_entrypoint)
+        self.assertIn("fullscreen=False", product_entrypoint)
         source = Path("frontend/src/styles.css").read_text(encoding="utf-8")
         self.assertIn(".app-shell", source)
         self.assertIn("overflow: hidden", source)
         self.assertIn(".table-scroll", source)
+        self.assertIn("max-width: 1199px", source)
+        self.assertIn("minmax(0, 1fr) minmax(270px, 300px)", source)
+        self.assertIn("quick-status-slot", source)
+        self.assertIn("max-height: calc(100vh - 16px)", source)
+        self.assertIn(".action-button:active", source)
+        self.assertIn(".stats-card", source)
+        self.assertIn("width: min(560px", source)
+        header_source = Path("frontend/src/components/Header.jsx").read_text(encoding="utf-8")
+        self.assertNotIn("aria-current=\"page\"", header_source)
+        self.assertIn("DiscordIcon", header_source)
+        self.assertIn("window_placement_builder=environment.product_window_placement_arguments", Path("revamped/main.py").read_text(encoding="utf-8"))
 
     def test_last_opened_newest_first_with_never_opened_at_bottom(self):
         now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
@@ -81,7 +98,10 @@ class TargetedProductPatchTests(unittest.TestCase):
     def test_exposed_sort_options_remove_account(self):
         header = Path("frontend/src/components/Header.jsx").read_text(encoding="utf-8")
         self.assertNotIn('value="account"', header)
-        self.assertIn('value="id"', header)
+        self.assertIn('["id", "Mã hồ sơ"]', header)
+        self.assertNotIn("<select", header)
+        self.assertIn('role="listbox"', header)
+        self.assertIn('event.key === "Escape"', header)
 
     def test_required_extensions_are_staged_loaded_and_pinned(self):
         state = self.application.extension_service.get_registry_state()
