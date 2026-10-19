@@ -30,6 +30,8 @@ __pycache__/
 /config/profiles.json
 /config/extensions.json
 /config/ui_preferences.json
+# The entire config directory is application-owned runtime state.
+/config/
 /.profiles.lock
 /config/.profiles.lock
 customers multi accounts.txt
@@ -51,3 +53,47 @@ Desktop.ini
 /frontend/node_modules/
 /frontend/dist/
 *.exe
+
+# Secrets and key material (template files such as .env.example stay allowed)
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.key
+*.pem
+*.crt
+*.cer
+*.pfx
+*.p12
+
+# Per-account config.js copies (the autofill extension template config.js stays tracked)
+**/config.js
+!extensions/discord-autofill-extension/config.js
+
+# Customer and account lists
+*customers*.txt
+*customers*.csv
+*accounts*.txt
+*accounts*.csv
+
+# Screenshots and recordings that may show accounts
+screenshots/
+recordings/
+*.mp4
+*.mov
+*.webm
+*.avi
+*.mkv
+
+# Test, cache, dependency and build output
+.pytest_cache/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+coverage.xml
+node_modules/
+.venv/
+build/
+dist/
