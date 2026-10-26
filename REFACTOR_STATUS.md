@@ -4,9 +4,10 @@
 
 R0 through R10A and R9B are complete on the isolated branch `refactor/revamped-parallel`.
 R13 remains a working-tree milestone without a commit boundary. R14 is
-PARTIAL: the product/development boundary, extension quarantine, account
-rollback, and integrity governance are implemented and automated; manual
-Windows/Tk/Chromium acceptance is still pending.
+PARTIAL: the product/development boundary, extension policy (only Autofill is
+required; the token extractor is optional), account rollback, and integrity
+governance are implemented and automated; manual Windows/Tk/Chromium acceptance
+is still pending.
 
 AUTOMATED PARITY: PASS
 DEFAULT ENTRYPOINT: REACT PRODUCT (`python main.py`); legacy via `python main.py --legacy`
@@ -34,7 +35,7 @@ The stable entrypoint is `main.py`, which starts the React product;
 | R9B | COMPLETE | Visible `REVAMPED DEV` Tk shell, disposable-only GUI safety, clean shutdown, and all requested automated gates PASS. Browser launch is opt-in only. |
 | R10A | COMPLETE | `verify_revamped.py`, frozen integrity, all synthetic compatibility categories, and all automated audit checks PASS. Manual acceptance remains user-owned. |
 | R13 | PARTIAL | Product/development account mode exists in the working tree; product metadata and strict composed-development identity tests pass. No clean milestone commit exists yet. |
-| R14 | PARTIAL | Explicit workspace boundary, prohibited-extension quarantine, transactional account rollback, and immutable-baseline governance implemented. Full automated gates pass; manual acceptance remains required. |
+| R14 | PARTIAL | Explicit workspace boundary, transactional account rollback, and immutable-baseline governance implemented. The R14 prohibition on the token extractor was lifted in beta prep: it is now an optional extension, and only Autofill is required. Full automated gates pass; manual acceptance remains required. |
 
 ## Standing evidence
 
@@ -55,5 +56,5 @@ The stable entrypoint is `main.py`, which starts the React product;
 - Packaging: LOCKED
 - R9B GUI launch: available with the explicit disposable `--workspace-root` command; default browser launch is disabled
 - R14 development launch: `--workspace-root` below repository `tmp/`; Product launch requires explicit `--product-root` and uses a product-owned marker
-- R14 token-extractor source: retained on disk for quarantine/audit only; not required, enabled, staged, or launched
+- Token-extractor source (`extensions/discord-token-extractor-extension`): kept in the repository as an optional extension; only Autofill is required. Fresh profiles do not receive it unless the global extension policy enables it. An existing copy is not deleted and keeps loading unless that policy disables it. Release builds exclude it (`scripts/release_manifest.json`: `denylist` and `source_only_optional`).
 - Manual GUI, real Chromium, and real Discord checks: NOT PERFORMED
