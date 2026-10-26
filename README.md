@@ -1,256 +1,122 @@
-# Discord Profile Manager
+# Trình quản lý đa tài khoản Discord (Discord Profile Manager)
 
-Windows desktop profile manager using the bundled Ungoogled Chromium runtime at
-`browser/chrome.exe`. Keep the complete runtime in `browser/`; that directory is
-intentionally ignored by Git. The manager does not install or update Chromium.
+Chào bạn! Đây là hướng dẫn cài đặt lần đầu, viết cho người dùng Windows chưa từng chạy dự án này. Hãy làm theo từng bước theo đúng thứ tự, mỗi bước đều có lệnh cụ thể. Nếu gặp lỗi, xem mục **Gặp lỗi thường gặp** ở cuối trang.
 
-## Run
+## Giới thiệu ngắn
 
-Install the Python dependencies once, from the project folder:
+Trình quản lý đa tài khoản Discord giúp bạn tạo nhiều **hồ sơ trình duyệt** tách biệt. Mỗi hồ sơ có cookie, phiên đăng nhập và dữ liệu lưu trữ riêng, và được mở trong một cửa sổ Chromium riêng. Dự án hiện chạy từ mã nguồn; chưa có bản đóng gói `.exe`.
+
+Dự án vẫn đang ở giai đoạn beta. Các kiểm tra tự động đã đạt, nhưng việc mở giao diện và chạy trình duyệt thật cần bạn tự kiểm tra trên máy của mình.
+
+## Yêu cầu trước khi cài
+
+- **Windows**, đã kiểm thử trên Windows 11.
+- **Python 3.13** (khuyến nghị). Tải tại [python.org](https://www.python.org/downloads/). Khi cài, hãy tick ô **Add python.exe to PATH**.
+- **Node.js 18 trở lên** (nên dùng bản LTS) để build giao diện React. Đã kiểm thử với Node.js 24.
+- **Git** để tải mã nguồn bằng lệnh `git clone`. Nếu không dùng Git, bạn có thể tải ZIP từ trang GitHub của dự án.
+- **Microsoft Edge WebView2 Runtime**: cửa sổ giao diện của pywebview dùng thành phần này. Windows 10 và 11 thường đã có sẵn. Nếu cửa sổ không mở, hãy cài thêm runtime này từ trang của Microsoft.
+- **Trình duyệt Ungoogled Chromium** (bản Windows, đủ toàn bộ các file của runtime). Bạn đặt vào thư mục `browser\`. Ứng dụng không tự cài hay cập nhật trình duyệt.
+
+## Cài đặt lần đầu
+
+Mở **PowerShell** và làm theo các bước sau.
+
+**Bước 1: Tải mã nguồn**
+
+```powershell
+git clone https://github.com/binveepich/discord-profile-manager.git
+cd discord-profile-manager
+```
+
+Nếu bạn không dùng Git, hãy tải ZIP từ trang GitHub của dự án, giải nén, rồi mở PowerShell trong thư mục vừa giải nén.
+
+**Bước 2: Cài các thư viện Python** (chạy từ thư mục dự án)
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-Build the React frontend once with Node.js, and rebuild it after frontend changes:
+Lệnh này cài `psutil` và `pywebview` đúng phiên bản ghi trong `requirements.txt`.
+
+**Bước 3: Build giao diện React**
+
+Chỉ cần làm một lần, và làm lại mỗi khi giao diện thay đổi:
 
 ```powershell
-Set-Location -LiteralPath '<REPO>\frontend'
+cd frontend
 npm ci
 npm run build
-Set-Location -LiteralPath '<REPO>'
+cd ..
 ```
 
-Start the product. This is the default entrypoint:
+Sau bước này, thư mục `frontend\dist\` sẽ được tạo ra.
+
+**Bước 4: Đặt trình duyệt**
+
+Tạo thư mục `browser` trong thư mục dự án (nếu chưa có), rồi đặt toàn bộ file của Ungoogled Chromium vào đó, sao cho có file `browser\chrome.exe`:
 
 ```powershell
-Set-Location -LiteralPath '<REPO>'
-python -B main.py
+mkdir browser
 ```
 
-If `frontend/dist/index.html` is missing, `main.py` stops with these build steps
-instead of opening a window. `python -m revamped.product_main` starts the same product.
+## Chạy ứng dụng
 
-The legacy Tkinter app is still available, but it is no longer the default. Release builds omit `legacy/`, so `--legacy` works only in the source checkout:
+Từ thư mục dự án, chạy lệnh:
 
 ```powershell
-python -B main.py --legacy
+python main.py
 ```
 
-The direct legacy command also remains compatible:
+Đây là bản React, và là bản mặc định. Cửa sổ **Trình quản lý đa tài khoản Discord** sẽ mở ra.
+
+Nếu bạn cần dùng bản cũ (giao diện Tkinter):
 
 ```powershell
-python -B .\legacy\profile_manager.py
+python main.py --legacy
 ```
 
-The legacy app needs Tkinter and the existing `psutil` dependency. The M1 tests were
-run with Python 3.11.8 and psutil 7.2.2 on Windows. The legacy app resolves browser
-and extension source paths relative to the project root, independent of the working
-directory. If `browser/chrome.exe` is missing or is a directory instead of a file,
-startup displays the expected full path and returns after the error dialog is
-dismissed. A missing runtime encountered when opening a profile uses the existing GUI
-error dialog.
+Bản cũ chỉ chạy được từ mã nguồn đầy đủ. Bản phát hành không đi kèm thư mục `legacy\`.
 
-## Packaging status
+Nếu `python main.py` dừng lại và hiện thông báo tiếng Anh "The React frontend is not built yet", nghĩa là bạn chưa làm bước 3. Hãy build giao diện theo bước 3, rồi chạy lại. Trong lúc chờ, bạn có thể dùng `python main.py --legacy`.
 
-Packaging is not active yet. The application is currently intended to be run and
-reviewed from source. Do not create an `.exe`, installer, portable release, or
-GitHub release artifact until the user explicitly approves the source-code version.
+## Dữ liệu của bạn
 
-## M1-M8 storage and launch compatibility
+- Mọi dữ liệu được lưu trên máy này, bên trong thư mục dự án: `profiles\` (hồ sơ trình duyệt), `config\` (danh sách hồ sơ và cấu hình), `data\`, `legacy\data\`, `legacy\log\`, `logs\`, và `tmp\` (dữ liệu tạm khi kiểm thử).
+- Các thư mục trên, cùng với `browser\`, `frontend\node_modules\` và `frontend\dist\`, được cấu hình để Git bỏ qua (xem file `.gitignore`).
+- **Ứng dụng không có tính năng sao lưu tự động.** Khi ứng dụng và trình duyệt đã đóng, hãy tự sao chép `config\`, `data\`, `legacy\data\` và `profiles\` sang một thư mục nằm ngoài dự án, tốt nhất là trên ổ đĩa khác.
+- Không bao giờ commit hoặc chia sẻ các thư mục `profiles\`, `config\` và `data\`, các file danh sách proxy (ví dụ `proxies*.txt`), cũng như các file chứa tài khoản (ví dụ `*accounts*.txt`).
 
-- Application-owned profile metadata is stored at `config/profiles.json` with a
-  versioned `profiles` list. It contains profile IDs, display names, relative
-  profile directories, timestamps, optional environment settings, and optional
-  proxy settings.
-- The existing `legacy/data/Local State` registry is retained as a compatibility
-  reader/mirror for M1-M3 installations. It is not the primary application
-  profile catalog, and Chromium-owned Local State files inside user-data roots
-  are not rewritten by M4.
-- New profiles use isolated roots under `profiles/profile_0001/`,
-  `profiles/profile_0002/`, and so on. The corresponding `profile_directory`
-  field in `config/profiles.json` records the managed directory.
-- Existing unmarked profiles continue working from `legacy/data/<profile ID>/`;
-  they are never moved automatically. Logs remain at `legacy/log/`.
-- `ProfileManager.migrate_profile(profile_id)` is an explicit, copy-only
-  migration for a registered legacy profile. It copies to a collision-free
-  `profiles/profile_####/` directory, updates both application metadata and the
-  compatibility mirror only after the copy succeeds, and leaves the legacy
-  source in place. A failed copy or metadata update leaves the source untouched
-  and reports the paths involved.
-- Root `extensions/` is the application-owned extension registry. Every
-   subdirectory with a valid `manifest.json` is discovered deterministically;
-   declared manifest files are validated before deployment. The autofill
-   account workflow additionally requires its profile-specific `config.js`.
-- Because the current content-script design embeds profile-specific account
-  configuration in `config.js`, each profile keeps its own unpacked deployment
-  under `Unpacked Extensions/`. Reusable source files are refreshed from the
-  root source while the profile's existing `config.js` is preserved.
-- Each launch keeps the existing launch flags, extension arguments, and Discord
-  URL while selecting the resolved legacy or managed user-data root.
+## Lưu ý quan trọng
 
-Legacy profile data, managed profiles, and logs remain excluded from Git.
-Chromium runtime files are unchanged. Browser environment and proxy settings are
-launch metadata only; they do not change Chromium source or implement deep
-fingerprint spoofing.
+Công cụ này dành để quản lý **các tài khoản Discord của chính bạn**. Tự động hóa hoặc điều khiển nhiều tài khoản Discord cùng lúc có thể vi phạm Điều khoản dịch vụ của Discord, và có thể khiến các tài khoản bị khóa hoặc bị cấm. Bạn tự chịu trách nhiệm về cách sử dụng.
 
-## React product candidate
+Mật khẩu và mã TOTP (nếu bạn nhập) được lưu trên máy này, trong file `config.js` của từng hồ sơ, dưới dạng **văn bản thuần, không mã hóa**. Điều này đúng ở cả bản React lẫn bản cũ. Chức năng xuất danh sách tài khoản cũng ghi mật khẩu và mã TOTP vào file xuất. Hãy bảo vệ máy tính bằng mật khẩu đăng nhập Windows, không để người khác dùng chung, và xóa các file xuất khi không còn cần.
 
-The daily-use source candidate is the default startup of the root `main.py` (see
-Run above). It uses React/Vite/Tailwind in `frontend/`, hosted by pywebview, with
-Python `revamped/product_api.py` as the authoritative bridge. Build it with
-`npm ci` and `npm run build` from `frontend/`, then run `python -B main.py`;
-`python -m revamped.product_main` starts the same product. See
-[docs/PRODUCT_CANDIDATE.md](docs/PRODUCT_CANDIDATE.md) for the account, proxy,
-export, backup, and snapshot behavior.
+## Gặp lỗi thường gặp
 
-## M7 environment behavior
+- **`python` không được nhận dạng.** Cài lại Python, tick **Add python.exe to PATH**, rồi mở lại PowerShell.
+- **`node` hoặc `npm` không được nhận dạng.** Cài Node.js 18 trở lên, rồi mở lại PowerShell.
+- **"The React frontend is not built yet".** Chạy lại bước 3 (build giao diện).
+- **"pywebview is not installed".** Chạy lại `python -m pip install -r requirements.txt` trong thư mục dự án.
+- **"Chromium browser runtime not found".** Kiểm tra file `browser\chrome.exe` có nằm đúng đường dẫn mà thông báo đã in ra không.
+- **Git báo "dubious ownership"** (thường gặp khi thư mục được sao chép từ một tài khoản Windows khác). Chạy lệnh sau, thay đường dẫn bằng đường dẫn thật của thư mục dự án và dùng dấu `/`:
 
-- `Desktop` (including older `default` metadata) keeps the normal launch flags.
-- `Mobile` applies generic mobile user-agent, touch, viewport, language, and
-  device-scale launch settings. The default scale factor is `1.0` and safe
-  per-profile overrides remain supported.
-- `Custom` accepts validated viewport, scale, language, mobile/touch, and timezone
-  metadata. Timezone is stored and validated but is not applied by the launcher
-  because the app has no CDP/session layer.
-- Invalid optional environment metadata falls back to a normal desktop launch.
+```powershell
+git config --global --add safe.directory "C:/duong/dan/den/discord-profile-manager"
+```
 
-## M8 optional proxy behavior
+- **Cửa sổ không mở.** Kiểm tra Microsoft Edge WebView2 Runtime đã được cài chưa, rồi chạy lại.
 
-- Proxy configuration is optional and isolated per profile. Proxy Off is the
-  default and adds no `--proxy-server` switch.
-- Valid unauthenticated `http`, `https`, `socks4`, and `socks5` endpoints are
-  normalized and passed to Chromium only for the profile that enabled them.
-- Malformed or incomplete optional proxy metadata safely behaves as Proxy Off;
-  it does not prevent a profile from launching.
-- M8 does not support proxy authentication, credential storage, proxy rotation,
-  proxy health checks, or provider integration. Credential-bearing pasted input
-  is rejected before save and is never stored in `profiles.json`, logged, or
-  passed to Chromium.
+## Dành cho nhà phát triển
 
-## M5 extension behavior
-
-- The required Autofill extension is deployed to every profile on launch
-  using staged per-profile copies; account setup writes only the selected
-  profile's Autofill `config.js`. The token extractor is optional and is not
-  deployed by default; it must be enabled deliberately per profile. Existing
-  profile copies are preserved and remain loadable. Its source stays in the
-  repository but is excluded from release builds.
-- Other valid extensions in the registry remain available for explicit future
-   default policies without adding another hard-coded deployment path.
-- Existing profile deployments are compatible across manager restarts. Missing or
-  invalid optional deployments are skipped during launch so browser profile data
-  remains usable; account setup reports source/deployment errors clearly.
-- Source updates replace reusable extension files without sharing account
-  configuration between profiles. Extra profile-local extension files are retained.
-- Account import continues to create isolated browser roots and isolated extension
-  configuration for each imported synthetic account.
-
-## R14 workspace and account boundary
-
-The revamped development composition requires an explicit workspace below the
-repository `tmp/` directory and accepts only synthetic `@example.invalid`
-account identifiers. Product mode requires a separate explicit `--product-root`
-decision (or the `compose_product()` API); it refuses unmarked existing state
-and never infers the repository's live `profiles/` or `config/` directories.
-Product mode persists only an account label and non-sensitive identifier.
-Passwords, tokens, TOTP secrets, sessions, cookies, and equivalent fields are
-rejected. The R14 product boundary remains a parallel/dev-only composition.
-The root `main.py` now starts the React product for beta (see Run above), and
-packaging remains locked.
-
-When `config/profiles.json` is missing or empty, the manager imports registered
-M1-M3 profiles and discovers valid existing managed profile roots without
-deleting or moving them. Malformed metadata is left unchanged and reported;
-missing directories remain metadata entries rather than being recreated. Valid
-managed folders absent from the catalog are safely re-imported. Metadata writes
-use a temporary file, validation, flush, and atomic replacement.
-
-## M2 lifecycle behavior
-
-- New profiles initialize `Default/Preferences` inside their `profiles/profile_####`
-  user-data root. Existing root-level legacy preferences are not moved or
-  overwritten.
-- IDs are checked against both the registry and existing directories/files.
-  A failed creation can leave an unregistered directory, which is retained and
-  never reused automatically.
-- Opening requires a registered ID and its existing directory. Missing data is
-  reported rather than replaced with an empty browser session.
-- Windows path aliases, case-colliding IDs, traversal, and links/junctions along
-  managed paths are rejected. Extension paths must belong to the selected profile.
-- Open supports multiple selected profiles. Each receives its own user-data root;
-  a failure for one does not prevent the others from being requested. Already
-  running profiles are reported and skipped; their windows are not brought forward.
-- Running-browser checks inspect live processes, so they also work after manager
-  restart. A running profile can be renamed but must be closed before deletion or
-  account preference changes. Uninspectable browser processes produce a clear error.
-- `Default` selection works by ID, independent of its star icon. Refresh preserves
-  selected IDs; malformed metadata clears stale rows and displays an error.
-- Invalid JSON/schema and unreadable metadata never trigger an automatic reset.
-  Correct or restore the affected file, then restart or refresh. Unknown valid
-  application fields are preserved; sensitive credential/session fields are
-  rejected from `profiles.json`.
-- A small `.manager.lock` file serializes manager profile mutations and launches.
-  Stale metadata saves are rejected. Keep other software from editing this registry
-  while manager operations are in progress.
-- Confirmed deletion first renames the active directory to
-  `.deleting-<ID>-<unique suffix>` beside that directory, then updates the
-  registry and removes the staged directory.
-  If the metadata save fails, the original directory is restored. A crash or failed
-  cleanup can leave staged data; its location is reported and it is never cleaned
-  automatically on restart. Inspect it before attempting recovery or removal.
-
-Compatibility is supported for the existing manager's unopened profiles and for
-complete independent Chromium user-data roots. A legacy folder containing browser
-session files directly at its top level is treated as a shared-root subprofile and
-blocked with an explanatory error. Ambiguous layouts, invalid browser Local State,
-and missing last-used internal directories are also blocked. M3's explicit copy
-migration rejects links and path collisions and never removes the legacy source.
-
-## Automated checks
+- Chạy kiểm thử tự động (dùng dữ liệu giả trong thư mục `tmp\`):
 
 ```powershell
 python -B -m unittest discover -s tests -v
 ```
 
-The unit tests use synthetic data in isolated directories under `tmp/`, suppress legacy
-import-time log setup, and mock browser process creation and GUI dialogs. They
-do not open Chromium or access production account data. They cover startup,
-launch errors, Windows argument parsing, isolated launch paths, extension
-arguments, existing Local State preservation, profile operations, account
-import/storage, lifecycle failures, process detection, multi-profile opening,
-copy-only legacy-to-`profiles/` migration safeguards, application-owned
-metadata recovery/atomic-write safeguards, environment presets, and optional
-proxy behavior.
+- Trạng thái dự án và các milestone: [REFACTOR_STATUS.md](REFACTOR_STATUS.md)
+- Kiểm tra thủ công trước khi phát hành (tiếng Anh): [docs/MANUAL_ACCEPTANCE.md](docs/MANUAL_ACCEPTANCE.md)
+- Thông tin về sản phẩm, sao lưu và snapshot (tiếng Anh): [docs/PRODUCT_CANDIDATE.md](docs/PRODUCT_CANDIDATE.md)
 
-An additional opt-in test launches the real runtime in headless mode against a
-loopback HTTP fixture, using only disposable workspace profiles:
-
-```powershell
-python -B tests/browser_smoke_m2.py
-```
-
-Run this in a normal Windows terminal: a restricted execution sandbox can prevent
-Chromium's child processes from starting. This test checks concurrent profile
-opening, cookie/Local Storage/IndexedDB separation, browser and manager restarts,
-rename persistence, and preservation of one profile when another is deleted.
-Test directories are removed on success and retained under `tmp/` on failure.
-It does not test Discord login or visible GUI behavior.
-
-The headless smoke test is also sensitive to the local Chromium build and Windows
-graphics environment. On some hosts, Chromium can fail during GPU persistent-cache
-initialization with a sharing violation (`0x20`) and exit with `0x80000003` before
-the fixture page loads. This is an environment-specific smoke-test limitation;
-normal GUI launches through the manager should be validated separately.
-
-## Manual acceptance
-
-Use the current source-review checklist in
-[`docs/MANUAL_ACCEPTANCE.md`](docs/MANUAL_ACCEPTANCE.md). It separates automated
-unit tests, the optional real-Chromium smoke test, visible GUI checks, and
-optional real Discord behavior. It also includes disposable-profile instructions,
-M7 environment checks, M8 proxy checks, missing-runtime behavior, and migration
-safety checks.
-
-Do not treat automated tests as proof of GUI or Discord behavior, and do not start
-packaging until the user explicitly approves the source-code version.
+Chúc bạn cài đặt thuận lợi!
