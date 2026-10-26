@@ -41,6 +41,19 @@ APPROVED_MILESTONE_HASHES = {
         "legacy/profile_manager.py": "1cb18a41b2b43543af95b66bc80c3b2e9a8892ee",
         "tests/test_m5_extensions.py": "6a590d135847d044e2e9b36133b7095cd1b23660",
     },
+    # Owner-approved beta routing: main.py starts the React product and keeps
+    # the legacy app behind --legacy. The R0 blob above is unchanged.
+    "Beta step 8 product entrypoint": {
+        "main.py": "66b95aa3821f2978f2dceebbb796b3011e5b2477",
+    },
+    # Owner-approved beta step 2.5: the legacy proxy and environment dialogs are
+    # repaired, and proxy editing is limited to endpoint fields. The legacy
+    # module and the two tests changed with it are recorded after the repair.
+    "Beta step 2.5 legacy proxy endpoint repair": {
+        "legacy/profile_manager.py": "c3aca7a7cfc2b6432032fdc05146cdcf2a1f7dce",
+        "tests/test_m5_extensions.py": "4360be9d05227d894f1e3da5873a1b11550c23a3",
+        "tests/test_m8_proxy.py": "bfa6cf7bcef37d39f68d343e788dd6d0a0816b1e",
+    },
 }
 
 # Compatibility name retained for callers that imported the old checker.

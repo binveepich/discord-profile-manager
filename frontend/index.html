@@ -5,8 +5,41 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0b0e13" />
     <title>Trình quản lý đa tài khoản Discord</title>
+    <script>
+      // Apply a saved light theme before the first paint, so the loading screen does not flash dark. The key matches
+      // STORAGE_KEY in src/uiPreferences.js. React takes over the theme once the app mounts.
+      try {
+        if (JSON.parse(localStorage.getItem("dpm.ui-preferences.v1") || "{}").theme === "light") {
+          document.documentElement.dataset.theme = "light";
+          document.documentElement.style.colorScheme = "light";
+        }
+      } catch {
+        // Storage can be blocked by the host webview. The dark default stays in place.
+      }
+      // Last resort: if the app bundle never mounts, the static splash says so instead of spinning forever.
+      window.setTimeout(function () {
+        var status = document.querySelector("#boot-splash .startup-status");
+        if (status) status.textContent = "Giao diện chưa tải xong. Hãy đóng và mở lại ứng dụng.";
+      }, 30000);
+    </script>
   </head>
   <body>
+    <div id="boot-splash" class="startup-splash" data-phase="loading" aria-busy="true">
+      <div class="startup-card">
+        <div class="startup-brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="img" aria-label="Discord" focusable="false">
+              <path fill="currentColor" d="M19.54 5.36A16.5 16.5 0 0 0 15.42 4l-.5 1.03a15.2 15.2 0 0 0-5.84 0L8.58 4a16.56 16.56 0 0 0-4.12 1.37C1.85 9.23 1.14 13 1.5 16.72a16.6 16.6 0 0 0 5.06 2.58l1.22-1.67c-.67-.25-1.3-.57-1.9-.95l.46-.36c3.67 1.7 8.2 1.7 11.83 0l.46.36c-.59.38-1.23.7-1.9.95l1.22 1.67a16.6 16.6 0 0 0 5.06-2.58c.42-4.32-.72-8.06-3.47-11.36ZM8.56 14.58c-1.1 0-2.01-1.02-2.01-2.27s.89-2.28 2.01-2.28 2.02 1.02 2.02 2.28-.9 2.27-2.02 2.27Zm6.88 0c-1.1 0-2.01-1.02-2.01-2.27s.89-2.28 2.01-2.28 2.02 1.02 2.02 2.28-.9 2.27-2.02 2.27Z" />
+            </svg>
+          </div>
+          <h1 class="startup-title">Trình quản lý đa tài khoản Discord</h1>
+        </div>
+        <p class="startup-status" role="status">Đang khởi động…</p>
+        <div class="progress-track startup-track">
+          <div class="progress-value" style="transform: scaleX(0)"></div>
+        </div>
+      </div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>

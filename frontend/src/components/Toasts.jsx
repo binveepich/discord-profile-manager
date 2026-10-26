@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { CheckCircle2, X, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, X, XCircle } from "lucide-react";
 import { exitMotionDuration } from "../motion";
 
+const TONES = {
+  success: { className: "toast-success", Icon: CheckCircle2 },
+  error: { className: "toast-error", Icon: XCircle },
+  warning: { className: "toast-warning", Icon: AlertTriangle },
+};
+
 function ToastItem({ item, onDismiss }) {
+  const tone = TONES[item.type] || TONES.success;
   const [phase, setPhase] = useState("enter");
   const onDismissRef = useRef(onDismiss);
   const exitingRef = useRef(false);
@@ -46,12 +53,12 @@ function ToastItem({ item, onDismiss }) {
   }, [startTimer]);
 
   return <div
-    className={`toast ${item.type === "error" ? "toast-error" : "toast-success"} toast-${phase}`}
+    className={`toast ${tone.className} toast-${phase}`}
     key={item.id}
     onMouseEnter={pauseTimer}
     onMouseLeave={startTimer}
   >
-    <span className="toast-icon">{item.type === "error" ? <XCircle className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}</span>
+    <span className="toast-icon"><tone.Icon className="h-4 w-4" /></span>
     <p>{item.message}</p>
     <button onClick={beginExit} aria-label="Đóng thông báo"><X className="h-4 w-4" /></button>
   </div>;

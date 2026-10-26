@@ -51,7 +51,7 @@ The application catalog validator also rejects sensitive field names, including 
 ## Extension account integration
 
 - `discord-autofill-extension` reads `ACCOUNT.email`, `ACCOUNT.password`, and `ACCOUNT.totpSecret` from its profile-local `config.js`. Only synthetic development mode populates this existing disposable config.
-- `discord-token-extractor-extension` is quarantined legacy material. It is not required, enabled, staged, or loaded by the revamped or legacy compatibility deployment paths.
+- `discord-token-extractor-extension` is optional. Fresh profiles do not receive it by default; valid existing copies are preserved and continue to load unless deliberately disabled. It can be enabled deliberately for deployment to other profiles. Its source remains in the repository but is excluded from release builds.
 - `discord-autofill-extension` is the only approved required built-in and remains a launch-time requirement independent of whether a profile has an account association.
 - Extension source directories are not modified by R13.
 

@@ -80,7 +80,7 @@ class ChromiumLauncher:
             *FIXED_ARGUMENTS,
             *self.build_environment_arguments(profile_record),
             *(
-                self.window_placement_builder(profile_id)
+                self.window_placement_builder(self._window_position(profile_id))
                 if self.window_placement_builder is not None
                 else ()
             ),
@@ -92,12 +92,21 @@ class ChromiumLauncher:
                 # A caller may hold deployments from an older policy.  Keep
                 # command assembly safe even when it is used directly rather
                 # than through launch_discord().
-                extension_paths = [
-                    path for path in extension_paths
-                    if path and self.extension_service.is_extension_enabled(
-                        Path(path).name
-                    )
-                ]
+                is_profile_enabled = getattr(
+                    self.extension_service, "is_profile_extension_enabled", None
+                )
+                if callable(is_profile_enabled):
+                    extension_paths = [
+                        path for path in extension_paths
+                        if path and is_profile_enabled(profile_id, Path(path).name)
+                    ]
+                else:
+                    extension_paths = [
+                        path for path in extension_paths
+                        if path and self.extension_service.is_extension_enabled(
+                            Path(path).name
+                        )
+                    ]
             valid_paths = [
                 str(checked_path(path, profile_data_dir))
                 for path in extension_paths
@@ -164,6 +173,10 @@ class ChromiumLauncher:
             except OSError as error:
                 raise ProfileManagerError(f"Cannot launch Chromium: {error}") from error
 
+    def _window_position(self, profile_id):
+        """Return the profile's 1-based STT position, the only input to its window side."""
+        return self.profile_service.display_position(profile_id)
+
     def _schedule_window_correction(self, profile_id, profile_data_dir, process):
         """Correct Chromium's restored bounds only for product-owned launches."""
         if (
@@ -173,11 +186,12 @@ class ChromiumLauncher:
         ):
             return
         try:
+            position = self._window_position(profile_id)
             # A missing work area deliberately produces no placement flags;
             # don't replace that safe behavior with a hard-coded correction.
-            if not self.window_placement_builder(profile_id):
+            if not self.window_placement_builder(position):
                 return
-            bounds = self.window_bounds_builder(profile_id)
+            bounds = self.window_bounds_builder(position)
             if not isinstance(bounds, dict):
                 return
             if not isinstance(getattr(process, "pid", None), int):

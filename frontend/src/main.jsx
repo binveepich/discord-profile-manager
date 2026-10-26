@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import App from "./App";
+import StartupGate from "./StartupGate";
 import "./styles.css";
 import { applyReduceMotionAttribute, readLocalReduceMotionExplicit, resolveReduceMotionPreference } from "./uiPreferences";
 
@@ -12,6 +12,6 @@ applyReduceMotionAttribute(
 
 createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <App />
+    <StartupGate />
   </React.StrictMode>,
 );

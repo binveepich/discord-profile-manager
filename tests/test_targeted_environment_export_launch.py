@@ -70,44 +70,38 @@ class TargetedEnvironmentExportLaunchTests(unittest.TestCase):
         self.assertLessEqual(geometry["x"] + geometry["width"], work_area["right"])
         self.assertLessEqual(geometry["y"] + geometry["height"], work_area["bottom"])
 
-    def test_profile_number_parity_controls_bounded_window_geometry(self):
+    def test_stt_position_controls_bounded_window_geometry(self):
         work_area = {"left": 100, "top": 80, "right": 1700, "bottom": 980}
-        expected_slots = {
-            "profile_0001": 0,
-            "profile_0002": 1,
-            "profile_0099": 0,
-            "profile_0100": 1,
-        }
+        expected_slots = {1: 0, 2: 1, 99: 0, 100: 1}
         bounds = {}
-        for profile_id, expected_slot in expected_slots.items():
-            bounds[profile_id] = environment.product_window_bounds(
-                profile_id, work_area=work_area, slot=1 - expected_slot
-            )
-            self.assertEqual(bounds[profile_id]["slot"], expected_slot)
-            geometry = bounds[profile_id]
+        for position, expected_slot in expected_slots.items():
+            bounds[position] = environment.product_window_bounds(position, work_area=work_area)
+            self.assertEqual(bounds[position]["slot"], expected_slot)
+            geometry = bounds[position]
             self.assertGreaterEqual(geometry["x"], work_area["left"])
             self.assertGreaterEqual(geometry["y"], work_area["top"])
             self.assertLessEqual(geometry["x"] + geometry["width"], work_area["right"])
             self.assertLessEqual(geometry["y"] + geometry["height"], work_area["bottom"])
-        self.assertLess(bounds["profile_0001"]["x"], bounds["profile_0002"]["x"])
-        self.assertEqual(bounds["profile_0001"]["width"], bounds["profile_0002"]["width"])
+        self.assertLess(bounds[1]["x"], bounds[2]["x"])
+        self.assertEqual(bounds[1]["width"], bounds[2]["width"])
 
     def test_first_three_profiles_keep_the_same_side_rule_in_a_group_launch(self):
         rows = [self.api.create_profile(f"Profile {number}") for number in range(1, 4)]
         profile_ids = [row["profile_id"] for row in rows]
-        slots = [environment.profile_window_slot(profile_id) for profile_id in profile_ids]
+        positions = {profile_id: position for position, profile_id in enumerate(profile_ids, 1)}
+        slots = [environment.window_slot_for_position(position) for position in positions.values()]
 
         self.assertEqual(profile_ids, ["profile_0001", "profile_0002", "profile_0003"])
         self.assertEqual(slots, [0, 1, 0])
-        for profile_id, slot in zip(profile_ids, slots):
+        for profile_id, position in positions.items():
             record = self.application.profile_service.get_profile_record(profile_id)
             command = self.application.launcher.build_command(
                 profile_id,
                 self.application.profile_service.get_profile_dir(profile_id),
                 record,
             )
-            bounds = environment.product_window_bounds(profile_id)
-            self.assertEqual(bounds["slot"], slot)
+            bounds = environment.product_window_bounds(position)
+            self.assertEqual(bounds["slot"], environment.window_slot_for_position(position))
             self.assertIn(f"--window-position={bounds['x']},{bounds['y']}", command)
             self.assertIn(f"--window-size={bounds['width']},{bounds['height']}", command)
 
@@ -135,15 +129,17 @@ class TargetedEnvironmentExportLaunchTests(unittest.TestCase):
         self.assertEqual(state["status"], "completed")
         self.assertEqual([profile_id for profile_id, _command in launched], profile_ids)
         for profile_id, command in launched:
-            bounds = environment.product_window_bounds(profile_id)
+            bounds = environment.product_window_bounds(positions[profile_id])
             self.assertIn(f"--window-position={bounds['x']},{bounds['y']}", command)
 
     def test_restored_window_correction_receives_first_three_profile_bounds(self):
         work_area = {"left": 100, "top": 80, "right": 1700, "bottom": 980}
+        for number in range(1, 4):
+            self.api.create_profile(f"Profile {number}")
         launcher = self.application.launcher
-        launcher.window_placement_builder = lambda profile_id: [profile_id]
-        launcher.window_bounds_builder = lambda profile_id: environment.product_window_bounds(
-            profile_id, work_area=work_area
+        launcher.window_placement_builder = lambda position: [position]
+        launcher.window_bounds_builder = lambda position: environment.product_window_bounds(
+            position, work_area=work_area
         )
         corrections = []
 
@@ -169,52 +165,40 @@ class TargetedEnvironmentExportLaunchTests(unittest.TestCase):
         self.assertEqual([item["bounds"]["slot"] for item in corrections], [0, 1, 0])
         self.assertEqual(
             [item["bounds"] for item in corrections],
-            [environment.product_window_bounds(profile_id, work_area=work_area)
-             for profile_id in ("profile_0001", "profile_0002", "profile_0003")],
+            [environment.product_window_bounds(position, work_area=work_area) for position in (1, 2, 3)],
         )
 
-    def test_malformed_profile_ids_fall_back_left_without_raising(self):
-        for profile_id in ("legacy-profile", "profile_x", None):
-            with self.subTest(profile_id=profile_id):
-                self.assertEqual(environment.profile_window_slot(profile_id), 0)
+    def test_missing_or_malformed_positions_fall_back_left_without_raising(self):
+        for position in (None, 0, "legacy-profile"):
+            with self.subTest(position=position):
+                self.assertEqual(environment.window_slot_for_position(position), 0)
                 geometry = environment.product_window_bounds(
-                    profile_id, work_area=(0, 0, 1280, 800)
+                    position, work_area=(0, 0, 1280, 800)
                 )
                 self.assertEqual(geometry["slot"], 0)
                 self.assertGreaterEqual(geometry["x"], 0)
                 self.assertLessEqual(geometry["x"] + geometry["width"], 1280)
 
-    def test_zero_suffix_is_even_and_uses_the_right_slot(self):
-        self.assertEqual(environment.profile_id_numeric_suffix("profile_0000"), 0)
-        self.assertEqual(environment.profile_window_slot("profile_0000"), 1)
-
-    def test_numeric_suffix_is_the_only_placement_input(self):
-        self.assertEqual(environment.profile_id_numeric_suffix("profile_0031"), 31)
-        self.assertEqual(environment.profile_id_numeric_suffix("custom42"), 42)
-        self.assertIsNone(environment.profile_id_numeric_suffix("profile_x"))
-        self.assertEqual(environment.profile_window_slot("profile_0031"), 0)
-        self.assertEqual(environment.profile_window_slot("profile_0042"), 1)
-
     def test_windows_placement_skips_hard_coded_bounds_if_display_geometry_is_unavailable(self):
         with patch("revamped.environment.get_windows_work_area", return_value=None):
             with patch("revamped.environment.sys.platform", "win32"):
                 self.assertEqual(
-                    environment.product_window_placement_arguments("profile_0001"),
+                    environment.product_window_placement_arguments(1),
                     [],
                 )
 
-    def test_product_launch_command_places_auto_profiles_by_stable_id(self):
+    def test_launch_command_places_each_profile_by_catalog_position(self):
         rows = [self.api.create_profile(f"Profile {number}") for number in range(1, 5)]
+        positions = {row["profile_id"]: position for position, row in enumerate(rows, 1)}
         for row in reversed(rows):
-            record = self.application.profile_service.get_profile_record(row["profile_id"])
-            # Presentation position must have no effect on placement.
-            record["stt"] = "0001"
+            profile_id = row["profile_id"]
+            record = self.application.profile_service.get_profile_record(profile_id)
             command = self.application.launcher.build_command(
-                row["profile_id"],
-                self.application.profile_service.get_profile_dir(row["profile_id"]),
+                profile_id,
+                self.application.profile_service.get_profile_dir(profile_id),
                 record,
             )
-            geometry = environment.product_window_bounds(row["profile_id"])
+            geometry = environment.product_window_bounds(positions[profile_id])
             self.assertIn(
                 f"--window-position={geometry['x']},{geometry['y']}", command
             )
@@ -223,31 +207,46 @@ class TargetedEnvironmentExportLaunchTests(unittest.TestCase):
             )
             self.assertFalse(environment.product_environment_launch_arguments(record))
 
-    def test_deleted_neighbor_does_not_change_remaining_profile_side(self):
-        first = self.api.create_profile("First")["profile_id"]
-        middle = self.api.create_profile("Middle")["profile_id"]
-        last = self.api.create_profile("Last")["profile_id"]
+    def test_deleted_neighbor_moves_later_profiles_to_their_new_stt_side(self):
+        desktop = {"preset": "desktop"}
+        first = self.api.create_profile("First", environment_payload=desktop)["profile_id"]
+        middle = self.api.create_profile("Middle", environment_payload=desktop)["profile_id"]
+        last = self.api.create_profile("Last", environment_payload=desktop)["profile_id"]
+        profiles = self.application.profile_service
+        self.assertEqual(profiles.display_position(last), 3)
         self.api.delete_profiles([middle], confirmed=True)
         row = next(row for row in self.api.list_profiles() if row["profile_id"] == last)
         self.assertEqual(row["stt"], "0002")
-        self.assertEqual(environment.profile_window_slot(last), 0)
-        self.assertEqual(environment.profile_window_slot(first), environment.profile_window_slot(last))
+        self.assertEqual(row["environment"]["window_geometry"]["slot"], 1)
+        self.assertEqual(profiles.display_position(first), 1)
+        self.assertEqual(profiles.display_position(last), 2)
+        command = self.application.launcher.build_command(
+            last,
+            profiles.get_profile_dir(last),
+            profiles.get_profile_record(last),
+        )
+        expected = environment.product_window_bounds(2)
+        self.assertEqual(expected["slot"], 1)
+        self.assertIn(f"--window-position={expected['x']},{expected['y']}", command)
 
-    def test_full_exports_use_one_schema_and_selected_profiles(self):
+    def test_full_exports_use_endpoint_only_proxy_schema(self):
         row = self.api.create_profile(
-            "Export me",
-            account_input="export@example.com:export-password:export-totp",
-            proxy_payload="http://proxy-user:proxy-password@proxy.example:8080",
+            "Proxy endpoint", proxy_payload="https://proxy.example:8443",
         )
         selected = [row["profile_id"]]
-        json_data = json.loads(self.api.export_json(selected)["content"])
+        json_export = self.api.export_json(selected)
+        json_data = json.loads(json_export["content"])
         csv_data = self.api.export_csv(selected)["content"]
         txt_data = self.api.export_txt(selected)["content"]
-        self.assertEqual(list(json_data[0]), list(self.api.export_json(selected)["columns"]))
-        self.assertIn("export-password", json_data[0]["password"])
-        self.assertEqual(json_data[0]["proxy_username"], "proxy-user")
-        self.assertIn("export-password", csv_data)
-        self.assertIn("proxy-password", txt_data)
+        exported = json_data[0]
+        self.assertEqual(list(exported), list(json_export["columns"]))
+        self.assertEqual(exported["proxy_scheme"], "https")
+        self.assertEqual(exported["proxy_host"], "proxy.example")
+        self.assertEqual(exported["proxy_port"], 8443)
+        for key in ("proxy_username", "proxy_password"):
+            self.assertNotIn(key, exported)
+            self.assertNotIn(key, csv_data)
+            self.assertNotIn(key, txt_data)
 
     def test_non_launch_operations_never_call_process_factory(self):
         self.api.create_profile("Create")

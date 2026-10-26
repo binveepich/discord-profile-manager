@@ -282,10 +282,8 @@ class ProfileCatalogStore:
     _forbidden_fragments = (
         "password", "token", "totp", "cookie", "session", "credential", "secret"
     )
-    # Proxy credentials are the one explicit credential-bearing exception:
-    # they are requested for account export and are written only by the proxy
-    # service.  Account secrets remain prohibited from profiles.json.
-    _allowed_credential_fields = {"proxyusername", "proxypassword"}
+    _legacy_proxy_credential_fields = {"proxy_username", "proxy_password"}
+    _removed_proxy_credential_names = {"proxyusername", "proxypassword"}
     required_fields = {
         "profile_id", "display_name", "profile_directory", "created_at",
         "last_opened_at", "proxy_enabled",
@@ -306,8 +304,8 @@ class ProfileCatalogStore:
             for field, nested in value.items():
                 normalized = str(field).replace("_", "").replace("-", "").casefold()
                 if (
-                    normalized not in cls._allowed_credential_fields
-                    and any(fragment in normalized for fragment in cls._forbidden_fragments)
+                    normalized in cls._removed_proxy_credential_names
+                    or any(fragment in normalized for fragment in cls._forbidden_fragments)
                 ):
                     raise ValueError(f"Sensitive field is not allowed in profiles.json: {field}")
                 cls._validate_field_names(nested)
@@ -379,6 +377,7 @@ class ProfileCatalogStore:
                 self._loaded_bytes = raw
                 return None
             data = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=self._unique_keys)
+            self._drop_legacy_proxy_credentials(data)
             self._validate(data, self.paths)
             self._loaded_bytes = raw
             return data
@@ -388,6 +387,19 @@ class ProfileCatalogStore:
             raise ProfileManagerError(
                 "Cannot read application profile metadata. The file was left unchanged."
             ) from error
+
+    @classmethod
+    def _drop_legacy_proxy_credentials(cls, data):
+        """Ignore old proxy credential keys in memory; never write during load."""
+        if not isinstance(data, dict):
+            return
+        records = data.get("profiles")
+        if not isinstance(records, list):
+            return
+        for record in records:
+            if isinstance(record, dict):
+                for field in cls._legacy_proxy_credential_fields:
+                    record.pop(field, None)
 
     @staticmethod
     def _replace_with_bounded_retry(source, destination, *, attempts=3):
@@ -463,7 +475,11 @@ class ExtensionPolicyStore:
     paths and manifests are rediscovered at runtime.
     """
 
-    version = 1
+    version = 2
+    legacy_required_extension_names = frozenset({
+        "discord-autofill-extension",
+        "discord-token-extractor-extension",
+    })
 
     def __init__(self, paths, logger=None):
         self.paths = paths
@@ -494,25 +510,57 @@ class ExtensionPolicyStore:
         )
 
     @classmethod
-    def _validate(cls, data):
-        if not isinstance(data, dict) or data.get("version") != cls.version:
-            raise ValueError("Unsupported extension policy version")
-        enabled = data.get("enabled_extensions")
-        if not isinstance(enabled, list):
-            raise ValueError("Expected an enabled_extensions list")
+    def _validate_names(cls, names, field):
+        if not isinstance(names, list):
+            raise ValueError(f"Expected a {field} list")
         seen = set()
-        for name in enabled:
+        for name in names:
             if not cls._valid_extension_name(name):
                 raise ValueError("Invalid extension name in global policy")
             folded = name.casefold()
             if folded in seen:
                 raise ValueError("Duplicate extension in global policy")
             seen.add(folded)
+        return seen
+
+    @classmethod
+    def _validate(cls, data):
+        if not isinstance(data, dict) or data.get("version") != cls.version:
+            raise ValueError("Unsupported extension policy version")
+        enabled = data.get("enabled_extensions")
+        disabled = data.get("disabled_extensions")
+        enabled_names = cls._validate_names(enabled, "enabled_extensions")
+        disabled_names = cls._validate_names(disabled, "disabled_extensions")
+        if enabled_names & disabled_names:
+            raise ValueError("An extension cannot be both enabled and disabled")
         return data
+
+    @classmethod
+    def _migrate_v1(cls, data):
+        if not isinstance(data, dict) or data.get("version") != 1:
+            raise ValueError("Unsupported legacy extension policy version")
+        enabled = data.get("enabled_extensions")
+        cls._validate_names(enabled, "enabled_extensions")
+        # In v1, required extensions were copied into this list whenever an
+        # optional setting changed. The extractor was therefore not an
+        # intentional opt-in; migration leaves it available but off by default.
+        enabled = [
+            name for name in enabled
+            if name.casefold() not in cls.legacy_required_extension_names
+        ]
+        return {
+            "version": cls.version,
+            "enabled_extensions": enabled,
+            "disabled_extensions": [],
+        }
 
     @staticmethod
     def empty_policy():
-        return {"version": ExtensionPolicyStore.version, "enabled_extensions": []}
+        return {
+            "version": ExtensionPolicyStore.version,
+            "enabled_extensions": [],
+            "disabled_extensions": [],
+        }
 
     def load(self):
         """Load policy, falling back safely when it is missing or malformed."""
@@ -525,7 +573,10 @@ class ExtensionPolicyStore:
                 self._loaded_bytes = raw
                 return self.empty_policy()
             data = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=self._unique_keys)
-            self._validate(data)
+            if isinstance(data, dict) and data.get("version") == 1:
+                data = self._migrate_v1(data)
+            else:
+                self._validate(data)
             self._loaded_bytes = raw
             return data
         except (OSError, ValueError, UnicodeError) as error:

@@ -17,8 +17,10 @@ and source-integrity guarantees. R14 does not switch the root entrypoint.
   state.
 - Store only approved product account metadata: mode, label, and account
   identifier.
-- Quarantine the Discord token-extractor extension from discovery, policy,
-  staging, and launch.
+- Keep the token-extractor source available as an optional repository
+  extension. Do not deploy it to fresh profiles by default; preserve valid
+  existing copies, allow deliberate enablement, and exclude the source from
+  release builds.
 - Verify the immutable R0 source baseline separately from named milestone
   changes and current working-tree changes.
 - Make account metadata/configuration transitions recoverable on write failure.
@@ -38,10 +40,12 @@ Development composition uses `compose(..., workspace_kind="development")` and
 Product roots are explicit and carry a small product-owned marker; an existing
 unmarked non-empty root is refused without importing or changing its data.
 
-The extension service defines required, prohibited, and quarantined extension
-sets. The token-extractor source is retained for audit/quarantine purposes but
-is not an available, optional, required, enabled, staged, or launchable
-extension.
+The extension service separates required built-ins from optional discovered
+sources. Autofill is the only required extension. When its source is valid, the
+token extractor appears as optional and can be enabled deliberately. It is not
+deployed to fresh profiles by default, while valid existing profile copies are
+preserved and remain loadable. The source stays in the repository but is
+excluded from release builds.
 
 Account transitions stage the previous local configuration, clear it, publish
 the new application metadata atomically, and restore the previous bytes if
@@ -59,8 +63,10 @@ publication fails. Account removal uses the same recoverable order.
   credential, secret, and equivalent field names.
 - Synthetic development account input remains restricted to
   `@example.invalid` and is disposable compatibility behavior.
-- The token-extractor extension cannot be required, enabled, staged, or loaded
-  by either extension deployment path.
+- The token extractor is optional and is not auto-deployed to fresh profiles.
+  Existing valid copies remain in the launch path unless deliberately disabled.
+  Deliberate enablement can deploy it to other profiles; its source is excluded
+  from release builds.
 - The root `main.py`, browser runtime, live profiles, live config, and logs are
   not changed by automated R14 tests.
 - A source-integrity PASS names the immutable R0 baseline and separately labels
@@ -71,13 +77,14 @@ publication fails. Account removal uses the same recoverable order.
 
 - `revamped/core.py`: centralized workspace policy and product marker.
 - `revamped/main.py`: explicit development/product composition and CLI roots.
-- `revamped/extensions.py`: prohibited extension quarantine and launch filter.
+- `revamped/extensions.py`: required Autofill, optional-source discovery, and
+  preservation of existing token-extractor deployments.
 - `revamped/accounts.py`: recoverable account transitions and secret-field
   rejection.
 - `revamped/profiles.py`: strict account metadata field validation.
 - `revamped/gui.py`: product/development workspace labeling.
-- `legacy/profile_manager.py`: legacy compatibility path no longer treats the
-  prohibited extension as required or launchable.
+- `legacy/profile_manager.py`: legacy compatibility path discovers the source
+  as optional and does not deploy it through the required-extension path.
 - `scripts/check_refactor_integrity.py`: immutable-baseline and approved-change
   governance.
 - `scripts/verify_revamped.py`: protected-runtime and extension-security gates.
@@ -88,18 +95,20 @@ publication fails. Account removal uses the same recoverable order.
 
 Automated tests use only disposable roots under repository `tmp/`. They cover
 development/product root separation, refusal of repository and unmarked roots,
-safe product metadata, sensitive input rejection, token-extension quarantine,
-stale-policy filtering, account rollback, integrity classification, ignored
-runtime snapshot mutation detection, root `main.py` integrity, and the
-existing regression/parity suites.
+safe product metadata, sensitive input rejection, optional-extension
+availability, default-off deployment, preservation of existing copies, policy
+migration, account rollback, integrity classification, ignored runtime snapshot
+mutation detection, root `main.py` integrity, and the existing regression/parity
+suites.
 
 ## Manual acceptance plan
 
 On Windows, manually verify the visible development GUI, the product-root
 marker and restart behavior, missing/malformed product-root refusal, browser
-launch opt-in behavior, extension state in `chrome://extensions`, and that no
-token-extractor deployment appears. Use synthetic accounts only. Do not use
-live profiles or real Discord credentials. Record Tk/Chromium results
+launch opt-in behavior, and extension state in `chrome://extensions`. Confirm a
+fresh profile does not receive a token-extractor deployment by default and that
+valid existing copies remain available to load. Use synthetic accounts only. Do
+not use live profiles or real Discord credentials. Record Tk/Chromium results
 separately from automated results.
 
 ## Completion criteria

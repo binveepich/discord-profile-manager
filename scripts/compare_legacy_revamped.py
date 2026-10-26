@@ -235,8 +235,8 @@ def _compare_proxy():
     records = [
         {"proxy_enabled": False},
         {"proxy_enabled": True, "proxy_scheme": "https", "proxy_host": "proxy.example", "proxy_port": 443},
-        {"proxy_enabled": True, "proxy_scheme": "socks5", "proxy_host": "2001:db8::1", "proxy_port": 1080},
-        {"proxy_enabled": True, "proxy_scheme": "unknown", "proxy_host": "bad host", "proxy_port": []},
+        {"proxy_enabled": True, "proxy_scheme": "socks5", "proxy_host": "proxy.example", "proxy_port": 1080},
+        {"proxy_enabled": True, "proxy_scheme": "http", "proxy_host": "invalid host", "proxy_port": []},
     ]
     for record in records:
         if proxy.effective_proxy(record) != legacy.effective_proxy(record):
@@ -245,11 +245,23 @@ def _compare_proxy():
             return False
     for value in (
         "proxy.example:8080",
-        "socks5://proxy.example:1080",
-        "https://user:password@secure-proxy.example:443",
-        "proxy.example:8080:user:pa:ss",
+        "https://proxy.example:8443",
+        "[2001:db8::1]:1080",
     ):
         if proxy.parse_proxy_string(value) != legacy.parse_proxy_string(value):
+            return False
+    auth = f"{'u' * 5}:{'p' * 7}"
+    for value in (f"https://{auth}@proxy.example:8443", f"proxy.example:8080:{auth}"):
+        modern_rejected = legacy_rejected = False
+        try:
+            proxy.parse_proxy_string(value)
+        except proxy.ProxyValidationError:
+            modern_rejected = True
+        try:
+            legacy.parse_proxy_string(value)
+        except legacy.ProxyValidationError:
+            legacy_rejected = True
+        if not modern_rejected or not legacy_rejected:
             return False
     return True
 

@@ -103,20 +103,20 @@ class TargetedProductPatchTests(unittest.TestCase):
         self.assertIn('role="listbox"', header)
         self.assertIn('event.key === "Escape"', header)
 
-    def test_required_extensions_are_staged_loaded_and_pinned(self):
+    def test_autofill_required_extension_is_staged_loaded_and_pinned(self):
         state = self.application.extension_service.get_registry_state()
         self.assertEqual(
             [item["name"] for item in state["built_ins"]],
-            ["discord-autofill-extension", "discord-token-extractor-extension"],
+            ["discord-autofill-extension"],
         )
         row = self.api.create_profile("Extensions")
         staged = self.application.extension_service.get_profile_extension_paths(row["profile_id"])
         self.assertEqual(
             {path.name for path in staged},
-            {"discord-autofill-extension", "discord-token-extractor-extension"},
+            {"discord-autofill-extension"},
         )
         registration = self.application.extension_service.get_profile_extension_registration(row["profile_id"])
-        self.assertEqual(len(registration["pinned_actions"]), 2)
+        self.assertEqual(len(registration["pinned_actions"]), 1)
         self.assertFalse(state["quarantined"])
 
 

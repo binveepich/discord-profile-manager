@@ -10,6 +10,7 @@ import csv
 from datetime import datetime
 import io
 import json
+import logging
 import re
 import subprocess
 import threading
@@ -21,9 +22,6 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import (
-    HTTPBasicAuthHandler,
-    HTTPPasswordMgrWithDefaultRealm,
-    ProxyBasicAuthHandler,
     ProxyHandler,
     Request,
     build_opener,
@@ -33,7 +31,7 @@ from urllib.request import (
 from . import environment, proxy
 from .accounts import derive_profile_name, parse_account_input
 from .core import ProfileManagerError
-from .profiles import MAX_DISPLAYED_PROFILES
+from .profiles import MAX_DISPLAYED_PROFILES, table_order
 
 
 _SECRET_WORDS = (
@@ -42,6 +40,10 @@ _SECRET_WORDS = (
 )
 
 CONTRIBUTOR_NAME = "merino sầu riêng"
+
+# Task names the loading splash may report. Other names are ignored, so the bridge cannot write arbitrary log lines.
+STARTUP_TASK_IDS = frozenset(("bridge", "catalog", "profiles", "preferences", "runtime", "about"))
+_LOGGER = logging.getLogger("discord-profile-manager.product")
 
 
 EXPORT_COLUMNS = (
@@ -68,8 +70,6 @@ EXPORT_COLUMNS = (
     "proxy_scheme",
     "proxy_host",
     "proxy_port",
-    "proxy_username",
-    "proxy_password",
     "created_at",
     "updated_at",
     "last_used",
@@ -242,11 +242,11 @@ class ProxyDiagnostics:
             return proxy.parse_proxy_string(value)
         if not isinstance(value, dict):
             raise proxy.ProxyValidationError("Proxy input must be text or an object.")
+        allowed = {"enabled", "scheme", "host", "port", "raw"}
+        if any(key not in allowed for key in value):
+            raise proxy.ProxyValidationError("Proxy settings contain an unsupported field.")
         if value.get("enabled") is False:
-            return {
-                "scheme": "http", "host": None, "port": None,
-                "username": None, "password": None, "authenticated": False,
-            }
+            return {"scheme": "http", "host": None, "port": None}
         parsed = proxy.parse_proxy_string(value.get("raw", "")) if value.get("raw") else None
         if parsed is not None:
             return parsed
@@ -255,7 +255,7 @@ class ProxyDiagnostics:
         )
         if normalized is None:
             raise proxy.ProxyValidationError("Proxy configuration is incomplete or invalid.")
-        return {**normalized, "username": None, "password": None, "authenticated": False}
+        return normalized
 
     def check(self, value, timeout=8, geolocation_provider=None):
         parsed = self._parsed(value)
@@ -276,20 +276,7 @@ class ProxyDiagnostics:
         display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
         proxy_uri = f"{parsed['scheme']}://{display_host}:{parsed['port']}"
         proxy_map = {"http": proxy_uri, "https": proxy_uri}
-        handlers = [ProxyHandler(proxy_map)]
-        if parsed.get("authenticated"):
-            password_manager = HTTPPasswordMgrWithDefaultRealm()
-            password_manager.add_password(
-                None,
-                proxy_uri,
-                parsed.get("username", ""),
-                parsed.get("password", ""),
-            )
-            handlers.extend([
-                ProxyBasicAuthHandler(password_manager),
-                HTTPBasicAuthHandler(password_manager),
-            ])
-        opener = build_opener(*handlers)
+        opener = build_opener(ProxyHandler(proxy_map))
         started = time.monotonic()
         try:
             request = Request(self.ip_endpoint, headers={"User-Agent": "DiscordProfileManager/1.0"})
@@ -469,11 +456,11 @@ class ProductAPI:
         return label.strip() if isinstance(label, str) and label.strip() else None
 
     @staticmethod
-    def _environment_view(record):
+    def _environment_view(record, position=None):
         preset, config = environment.effective_environment(record)
         product_details = None
         if config.get("environment_schema") == environment.PRODUCT_ENVIRONMENT_SCHEMA:
-            product_details = environment.product_environment_details(record)
+            product_details = environment.product_environment_details(record, position=position)
             config = {
                 **config,
                 "window_width": product_details["window_geometry"]["width"],
@@ -535,7 +522,7 @@ class ProductAPI:
             "name": record.get("display_name") or profile_id,
             "account": account,
             "has_account": bool(account),
-            "environment": self._environment_view(record),
+            "environment": self._environment_view(record, position=stt),
             "proxy": {
                 "enabled": bool(proxy_state.get("enabled")),
                 "scheme": proxy_state.get("scheme"),
@@ -547,12 +534,31 @@ class ProductAPI:
             "created_at": record.get("created_at"),
         }
 
+    def initialize_catalog(self):
+        """Reconcile and publish the application catalog for the loading splash.
+
+        This is the controlled startup write that used to run before the window
+        opened. The splash runs it as a critical task, so a failure is shown
+        instead of opening an empty table.
+        """
+        catalog = self.profile_service.initialize_metadata()
+        return {"profiles": len(catalog["profiles"])}
+
+    def report_startup_warning(self, task_id, message):
+        """Log one non-critical startup failure that the splash reported."""
+        if str(task_id) not in STARTUP_TASK_IDS:
+            return {"logged": False}
+        text = " ".join(str(message or "").split())[:200]
+        _LOGGER.warning("Startup task %s reported a problem: %s", task_id, text)
+        return {"logged": True}
+
     def list_profiles(self, search="", sort="stt", reverse=False, status=None):
         records = self._records()
         statuses = self._status_map(records)
+        # STT is the position in table order, so the records are sorted before they are numbered.
         rows = [
-            self._dto(record, index, statuses.get(record["profile_id"], "Error"))
-            for index, record in enumerate(records, 1)
+            self._dto(record, position, statuses.get(record["profile_id"], "Error"))
+            for position, record in table_order(records)
         ]
         needle = str(search or "").strip().casefold()
         if needle:
@@ -588,13 +594,21 @@ class ProductAPI:
             rows.sort(key=keys.get(sort_key, keys["stt"]), reverse=bool(reverse))
         return _json_safe(rows)
 
+    def display_order(self):
+        """Return every profile's STT in table order, for the table to take after a change that moves rows."""
+        records = self._records()
+        return _json_safe([
+            {"profile_id": record["profile_id"], "stt": f"{position:04d}"}
+            for position, record in table_order(records)
+        ])
+
     def get_profile(self, profile_id):
         records = self._records()
         statuses = self._status_map(records, [profile_id])
-        for index, record in enumerate(records, 1):
+        for position, record in table_order(records):
             if record.get("profile_id") == profile_id:
                 return _json_safe(self._dto(
-                    record, index, statuses.get(profile_id, "Error")
+                    record, position, statuses.get(profile_id, "Error")
                 ))
         raise ProfileManagerError("Profile was not found.")
 
@@ -617,8 +631,8 @@ class ProductAPI:
         """Return complete display rows for only the requested stable IDs."""
         requested = [str(value) for value in profile_ids]
         records = self._records()
-        by_id = {record["profile_id"]: (index, record)
-                 for index, record in enumerate(records, 1)}
+        by_id = {record["profile_id"]: (position, record)
+                 for position, record in table_order(records)}
         statuses = self._status_map(records, requested)
         rows = []
         for profile_id in requested:
@@ -669,7 +683,7 @@ class ProductAPI:
             return {"enabled": True, **parsed}
         if not isinstance(value, dict):
             raise proxy.ProxyValidationError("Proxy settings must be an object or endpoint text.")
-        allowed = {"enabled", "scheme", "host", "port", "username", "password", "authenticated", "raw"}
+        allowed = {"enabled", "scheme", "host", "port"}
         if any(key not in allowed for key in value):
             raise proxy.ProxyValidationError("Proxy settings contain an unsupported field.")
         enabled = value.get("enabled", True)
@@ -682,12 +696,7 @@ class ProductAPI:
         )
         if normalized is None:
             raise proxy.ProxyValidationError("Proxy configuration is incomplete or invalid.")
-        result = {"enabled": True, **normalized}
-        if "username" in value or "password" in value:
-            result.update(proxy.normalize_proxy_credentials(
-                value.get("username"), value.get("password")
-            ))
-        return result
+        return {"enabled": True, **normalized}
 
     @staticmethod
     def _environment_request(payload):
@@ -1154,7 +1163,7 @@ class ProductAPI:
     def _export_rows(self, profile_ids=None):
         """Build complete account records only for the explicit export action."""
         records = self._records()
-        stt_by_id = {record["profile_id"]: f"{index:04d}" for index, record in enumerate(records, 1)}
+        stt_by_id = {record["profile_id"]: f"{position:04d}" for position, record in table_order(records)}
         if profile_ids is not None:
             if not isinstance(profile_ids, (list, tuple, set)):
                 profile_ids = [profile_ids]
@@ -1170,7 +1179,7 @@ class ProductAPI:
             profile_id = record["profile_id"]
             credentials = self._credential_record(profile_id)
             account_metadata = record.get("account") if isinstance(record.get("account"), dict) else {}
-            env = self._environment_view(record)
+            env = self._environment_view(record, position=int(stt_by_id[profile_id]))
             proxy_state = proxy.effective_proxy(record)
             row = {
                 "profile_id": profile_id,
@@ -1196,8 +1205,6 @@ class ProductAPI:
                 "proxy_scheme": proxy_state.get("scheme") or "",
                 "proxy_host": proxy_state.get("host") or "",
                 "proxy_port": proxy_state.get("port") or "",
-                "proxy_username": proxy_state.get("username") or "",
-                "proxy_password": proxy_state.get("password") or "",
                 "created_at": record.get("created_at") or "",
                 "updated_at": record.get("updated_at") or record.get("created_at") or "",
                 "last_used": record.get("last_opened_at") or "",
@@ -1301,14 +1308,9 @@ class ProductAPI:
 
     def parse_proxy(self, value):
         parsed = proxy.parse_proxy_string(value)
-        # Parsing is an explicit, transient operation.  The result is never
-        # included in profile DTOs or exports; the UI may use it to populate
-        # fields and warn that authenticated launch persistence is unavailable.
         return _json_safe({
             "scheme": parsed["scheme"], "host": parsed["host"], "port": parsed["port"],
-            "username": parsed.get("username"), "password": parsed.get("password"),
-            "authenticated": parsed.get("authenticated", False),
-        }, drop_sensitive=False)
+        })
 
     def check_proxy(self, value, timeout=8):
         return self.jobs.start(

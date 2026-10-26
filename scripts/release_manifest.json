@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "allowlist": [
+    "revamped/**",
+    "frontend/index.html",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/postcss.config.js",
+    "frontend/tailwind.config.js",
+    "frontend/vite.config.js",
+    "frontend/src/**",
+    "frontend/public/**",
+    "extensions/discord-autofill-extension/**",
+    "requirements*.txt",
+    "pyproject.toml",
+    "main.py",
+    "README.md",
+    "LICENSE",
+    "docs/IMPORT_LEGACY_PROFILES.md"
+  ],
+  "generated": [
+    "frontend/dist/**"
+  ],
+  "denylist": [
+    "**/profiles/**",
+    "**/config/**",
+    "**/data/**",
+    "**/logs/**",
+    "**/tmp/**",
+    "**/browser/**",
+    "**/build/**",
+    "legacy/data/**",
+    "legacy/log/**",
+    "extensions/discord-token-extractor-extension/**",
+    "**/Local State",
+    "**/*.lock",
+    "**/proxies*.txt",
+    "**/*proxies*.txt",
+    "**/working_proxies*.txt",
+    "**/*customers*",
+    "**/*accounts*.txt",
+    "**/.env*",
+    "**/node_modules/**",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/.pytest_cache/**",
+    "**/coverage/**",
+    "**/coverage.xml",
+    "**/htmlcov/**",
+    "**/test-results/**",
+    "**/test-output/**",
+    "**/playwright-report/**",
+    "**/.coverage*",
+    "**/junit*.xml"
+  ],
+  "source_only_optional": [
+    "extensions/discord-token-extractor-extension/**"
+  ],
+  "legacy_imports": "include-imported-modules-only",
+  "notes": [
+    "main.py is the release entrypoint: python main.py starts the React product.",
+    "legacy/ is excluded from the beta release. python main.py --legacy is a source-checkout development convenience only."
+  ]
+}

@@ -2,33 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-@property --color-ink { syntax: "<color>"; inherits: true; initial-value: #090b1d; }
-@property --color-panel { syntax: "<color>"; inherits: true; initial-value: #11162b; }
-@property --color-elevated { syntax: "<color>"; inherits: true; initial-value: #171e3d; }
-@property --color-line { syntax: "<color>"; inherits: true; initial-value: #293650; }
-@property --color-text { syntax: "<color>"; inherits: true; initial-value: #aab4ce; }
-@property --color-text-strong { syntax: "<color>"; inherits: true; initial-value: #f2f5ff; }
-@property --color-text-muted { syntax: "<color>"; inherits: true; initial-value: #aab4ce; }
-@property --color-text-subtle { syntax: "<color>"; inherits: true; initial-value: #7f8caa; }
-@property --color-accent { syntax: "<color>"; inherits: true; initial-value: #2f578a; }
-@property --color-accent-strong { syntax: "<color>"; inherits: true; initial-value: #3c659b; }
-@property --color-accent-text { syntax: "<color>"; inherits: true; initial-value: #8eafe0; }
-@property --color-accent-icon { syntax: "<color>"; inherits: true; initial-value: #8eafe0; }
-@property --color-on-accent { syntax: "<color>"; inherits: true; initial-value: #ffffff; }
-@property --color-toggle-knob { syntax: "<color>"; inherits: true; initial-value: #ffffff; }
-@property --color-hover { syntax: "<color>"; inherits: true; initial-value: #2f578a; }
-@property --color-selected { syntax: "<color>"; inherits: true; initial-value: #232f72; }
-@property --color-focus { syntax: "<color>"; inherits: true; initial-value: #6f96ca; }
-@property --color-success { syntax: "<color>"; inherits: true; initial-value: #36ada3; }
-@property --color-warning { syntax: "<color>"; inherits: true; initial-value: #e6ae53; }
-@property --color-danger { syntax: "<color>"; inherits: true; initial-value: #ef7189; }
-@property --color-overlay { syntax: "<color>"; inherits: true; initial-value: rgba(4, 5, 17, .78); }
-@property --color-line-subtle { syntax: "<color>"; inherits: true; initial-value: #293650; }
-@property --color-line-strong { syntax: "<color>"; inherits: true; initial-value: #293650; }
-@property --color-accent-hover { syntax: "<color>"; inherits: true; initial-value: #3c659b; }
-@property --color-accent-active { syntax: "<color>"; inherits: true; initial-value: #2f578a; }
-@property --color-text-secondary { syntax: "<color>"; inherits: true; initial-value: #aab4ce; }
-
 :root {
   --motion-duration-instant: 80ms;
   --motion-duration-micro: 120ms;
@@ -73,32 +46,6 @@
   --color-accent-active: #2f578a;
   --color-text-secondary: #aab4ce;
   --shadow-panel: 0 16px 40px rgba(0, 0, 0, .34);
-  transition: --color-ink var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-panel var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-elevated var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-line var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-text var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-text-strong var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-text-muted var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-text-subtle var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-accent var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-accent-strong var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-accent-text var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-accent-icon var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-on-accent var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-toggle-knob var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-hover var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-selected var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-focus var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-success var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-warning var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-danger var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-overlay var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-line-subtle var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-line-strong var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-accent-hover var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-accent-active var(--motion-duration-normal) var(--motion-ease-standard),
-    --color-text-secondary var(--motion-duration-normal) var(--motion-ease-standard);
 }
 
 :root[data-theme="light"] {
@@ -149,6 +96,13 @@
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; overflow: hidden; }
 body { margin: 0; min-width: 320px; background: var(--color-ink); color: var(--color-text); }
+/* Theme cross-fade: only large surfaces fade, and only their own background and border colors. Fading the inherited
+   theme tokens on :root forced a full-document style recalculation on every animation frame. */
+body, .app-shell, .app-header, .panel, .workspace-strip, .profile-table thead, .table-footer {
+  transition: background-color var(--motion-duration-normal) var(--motion-ease-standard), border-color var(--motion-duration-normal) var(--motion-ease-standard);
+}
+/* Theme switch: App.jsx adds this class for about one frame while the colors change under the blur, so nothing transitions. */
+:root.theme-swap, :root.theme-swap *, :root.theme-swap *::before, :root.theme-swap *::after { transition: none !important; }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .48; }
@@ -186,7 +140,6 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 }
 
 .app-shell { @apply flex h-full min-h-0 min-w-0 flex-col overflow-hidden; background: var(--color-ink); color: var(--color-text); }
-:root[data-reduce-motion="true"] { transition: none; }
 button:not(:disabled), .control, .search-field, .profile-row, .row-action, .info-button, .sort-trigger, .sort-option, .repository-link, .nav-item, .progress-value {
   transition-timing-function: var(--motion-ease-standard);
 }
@@ -276,19 +229,19 @@ button:focus-visible, .control, .search-field { transition-property: background-
 .profile-table th, .profile-table td { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .profile-table th:first-child, .profile-table td:first-child { width: 52px; }
 .profile-table .stt-column { width: 54px; }
-.profile-table .actions-column { width: 92px; }
+.profile-table .actions-column { width: 100px; }
 .profile-table tbody { border-color: var(--color-line); }
-.profile-row { @apply cursor-pointer border-b transition-colors; border-color: color-mix(in srgb, var(--color-line) 72%, transparent); transition: background-color var(--motion-duration-micro) var(--motion-ease-standard), border-color var(--motion-duration-micro) var(--motion-ease-standard), color var(--motion-duration-micro) var(--motion-ease-standard); }
+.profile-row { @apply cursor-pointer border-b; border-color: color-mix(in srgb, var(--color-line) 72%, transparent); transition: background-color var(--motion-duration-micro) var(--motion-ease-standard); }
 .profile-row-enter { animation: list-in var(--motion-duration-normal) var(--motion-ease-standard) backwards; animation-delay: calc(var(--motion-duration-stagger) * var(--motion-stagger-index, 0)); }
 .profile-row-exit { pointer-events: none; animation: list-out var(--motion-duration-fast) var(--motion-ease-exit) forwards; }
-.profile-row-flip { transition: transform var(--motion-duration-normal) var(--motion-ease-standard), background-color var(--motion-duration-micro) var(--motion-ease-standard), border-color var(--motion-duration-micro) var(--motion-ease-standard), color var(--motion-duration-micro) var(--motion-ease-standard); }
+.profile-row-flip { transition: transform var(--motion-duration-normal) var(--motion-ease-standard), background-color var(--motion-duration-micro) var(--motion-ease-standard); }
 .profile-row:hover { background: color-mix(in srgb, var(--color-elevated) 68%, transparent); }
 .profile-row-selected { background: color-mix(in srgb, var(--color-accent) 11%, transparent); }
-:root:not([data-theme="light"]) .profile-row:hover, :root:not([data-theme="light"]) .row-action:hover { background: color-mix(in srgb, var(--color-hover) 18%, transparent); }
+:root:not([data-theme="light"]) .profile-row:hover, :root:not([data-theme="light"]) .row-action:hover:not(:active):not(:disabled) { background: color-mix(in srgb, var(--color-hover) 18%, transparent); }
 :root:not([data-theme="light"]) .profile-row-selected { background: color-mix(in srgb, var(--color-selected) 42%, transparent); }
 :root:not([data-theme="light"]) .profile-row:active { background: color-mix(in srgb, var(--color-hover) 30%, transparent); }
 .profile-table td { @apply px-3 py-4; color: var(--color-text); }
-.profile-row-compact .profile-table td { @apply py-2.5; }
+.profile-row-compact .profile-table td { @apply py-2; }
 .stt-column { @apply text-center; color: var(--color-text-subtle) !important; }
 .profile-name, .table-primary { @apply truncate font-medium; color: var(--color-text-strong); }
 .profile-id { @apply mt-1 font-mono text-[10px]; color: var(--color-text-subtle); }
@@ -301,8 +254,11 @@ button:focus-visible, .control, .search-field { transition-property: background-
 .status-closed { color: var(--color-text-muted); border-color: var(--color-line); background: var(--color-elevated); }
 .status-error { color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 30%, var(--color-line)); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
 .row-actions { @apply flex items-center justify-end gap-1; }
-.row-action { @apply grid h-8 w-8 place-items-center rounded-md transition; color: var(--color-text-muted); }
-.row-action:hover { background: var(--color-elevated); color: var(--color-text-strong); }
+.row-action { @apply grid h-9 w-9 place-items-center rounded-md border; border-color: var(--color-line); background: var(--color-elevated); color: var(--color-text-muted); transition: background-color var(--motion-duration-micro) var(--motion-ease-standard), border-color var(--motion-duration-micro) var(--motion-ease-standard), color var(--motion-duration-micro) var(--motion-ease-standard), transform var(--motion-duration-micro) var(--motion-ease-standard); }
+.row-action:hover:not(:disabled) { border-color: var(--color-line-strong); background: var(--color-panel); color: var(--color-text-strong); }
+.row-action:active:not(:disabled) { border-color: var(--color-accent-strong); background: var(--color-accent-active); color: var(--color-on-accent); }
+.row-action:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; box-shadow: 0 0 0 1px var(--color-panel); }
+.row-action:disabled { border-color: var(--color-line); background: var(--color-panel); color: var(--color-text-subtle); cursor: not-allowed; opacity: .55; }
 .row-open { color: var(--color-accent-icon); }
 .empty-state { @apply grid h-48 place-items-center content-center gap-1 text-center text-sm; color: var(--color-text-muted); }
 .empty-state-icon { @apply mb-2 grid h-9 w-9 place-items-center rounded-full; background: var(--color-elevated); color: var(--color-text-subtle); }
@@ -473,6 +429,7 @@ button:focus-visible, .control, .search-field { transition-property: background-
 .toast button { @apply text-xs; color: var(--color-text-muted); }
 .toast-success .toast-icon { color: var(--color-success); }
 .toast-error .toast-icon { color: var(--color-danger); }
+.toast-warning .toast-icon { color: var(--color-warning); }
 .spin-once { animation: spin var(--motion-duration-spinner) var(--motion-ease-linear) infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .skeleton { overflow: hidden; border-radius: 6px; background: color-mix(in srgb, var(--color-text-muted) 16%, var(--color-elevated)); }
@@ -695,3 +652,22 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--color-ac
   border-color: var(--color-panel);
   background: var(--color-line-strong);
 }
+
+/* Loading splash: covers the app from first paint until the app has mounted behind it, then fades out. Reduced motion
+   comes from the global rule above (transitions become instant), and the looping sweep is removed here. */
+.startup-splash { position: fixed; inset: 0; z-index: 1100; display: grid; place-items: center; padding: 24px; background: var(--color-ink); color: var(--color-text); transition: opacity var(--motion-duration-normal) var(--motion-ease-standard); }
+.startup-splash[data-phase="leaving"] { opacity: 0; pointer-events: none; }
+.startup-card { display: grid; width: min(360px, 100%); gap: 16px; }
+.startup-brand { display: flex; min-width: 0; align-items: center; gap: 12px; }
+.startup-title { min-width: 0; font-size: 15px; font-weight: 600; color: var(--color-text-strong); }
+.startup-status { font-size: 13px; color: var(--color-text-muted); }
+.startup-track { position: relative; }
+.startup-sweep { position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--color-text-strong) 30%, transparent), transparent); }
+.startup-splash[data-phase="loading"] .startup-sweep { animation: startup-sweep var(--motion-duration-skeleton) var(--motion-ease-linear) infinite; }
+.startup-count { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--color-text-subtle); }
+.startup-error { display: grid; gap: 10px; padding: 16px; border: 1px solid var(--color-line); border-radius: 12px; background: var(--color-panel); }
+.startup-error-title { font-size: 14px; font-weight: 600; color: var(--color-text-strong); }
+.startup-error-body, .startup-detail { font-size: 12px; color: var(--color-text-muted); overflow-wrap: anywhere; }
+.startup-error .primary-button { justify-self: start; }
+:root[data-reduce-motion="true"] .startup-sweep { display: none; }
+@keyframes startup-sweep { to { transform: translateX(100%); } }

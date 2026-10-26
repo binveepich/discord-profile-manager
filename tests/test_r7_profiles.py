@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from revamped.core import ProfileManagerError, ProfileNotFoundError, ProjectPaths
 from revamped.profiles import ProfileService
-from revamped.storage import LegacyStateStore
+from revamped.models import ProfileRecord
+from revamped.storage import LegacyStateStore, ProfileCatalogStore
 from tests.compatibility.fixtures import DisposableWorkspace
 
 
@@ -253,6 +254,37 @@ class ProfileLifecycleTests(unittest.TestCase):
                 service.get_profile_record(profile_id)["last_opened_at"],
                 "2026-09-15T12:00:00Z",
             )
+
+    def test_old_proxy_credential_keys_load_dropped_without_changing_endpoint(self):
+        with DisposableWorkspace("proxy-credential-compat") as workspace:
+            paths, service = self.make_service(workspace)
+            service.initialize_metadata()
+            profile_id = service.create_profile("Proxy endpoint")
+            service.set_proxy(profile_id, True, "https", "proxy.example", 8443)
+
+            catalog = json.loads(paths.profiles_json.read_text(encoding="utf-8"))
+            record = next(item for item in catalog["profiles"] if item["profile_id"] == profile_id)
+            record["proxy_username"] = "legacy-user" + "x" * 4
+            record["proxy_password"] = "legacy-value" + "y" * 6
+            raw_with_legacy_fields = json.dumps(catalog, indent=2) + "\n"
+            paths.profiles_json.write_text(raw_with_legacy_fields, encoding="utf-8")
+            bytes_before_load = paths.profiles_json.read_bytes()
+
+            loaded = ProfileCatalogStore(paths).load()
+            loaded_record = next(item for item in loaded["profiles"] if item["profile_id"] == profile_id)
+            self.assertNotIn("proxy_username", loaded_record)
+            self.assertNotIn("proxy_password", loaded_record)
+            self.assertEqual(loaded_record["proxy_enabled"], True)
+            self.assertEqual(loaded_record["proxy_scheme"], "https")
+            self.assertEqual(loaded_record["proxy_host"], "proxy.example")
+            self.assertEqual(loaded_record["proxy_port"], 8443)
+            self.assertEqual(paths.profiles_json.read_bytes(), bytes_before_load)
+
+            model_record = ProfileRecord.from_mapping(record).to_mapping()
+            self.assertNotIn("proxy_username", model_record)
+            self.assertNotIn("proxy_password", model_record)
+            self.assertEqual(model_record["proxy_host"], "proxy.example")
+            self.assertEqual(model_record["proxy_port"], 8443)
 
 
 if __name__ == "__main__":

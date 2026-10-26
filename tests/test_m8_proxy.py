@@ -114,48 +114,32 @@ class ProxyTests(unittest.TestCase):
 
     def test_parse_host_port(self):
         self.assertEqual(self.manager.parse_proxy_string("proxy.example:8080"), {
-            "scheme": "http",
-            "host": "proxy.example",
-            "port": 8080,
-            "username": None,
-            "password": None,
-            "authenticated": False,
+            "scheme": "http", "host": "proxy.example", "port": 8080,
         })
 
-    def test_parse_host_port_username_password_preserves_credentials(self):
-        parsed = self.manager.parse_proxy_string("proxy.example:8080:user:pa:ss")
-
-        self.assertEqual(parsed["host"], "proxy.example")
-        self.assertEqual(parsed["port"], 8080)
-        self.assertEqual(parsed["username"], "user")
-        self.assertEqual(parsed["password"], "pa:ss")
-        self.assertTrue(parsed["authenticated"])
+    def test_parse_host_port_authentication_is_rejected(self):
+        auth = f"{'u' * 5}:{'p' * 7}"
+        with self.assertRaises(self.manager.ProxyValidationError):
+            self.manager.parse_proxy_string(f"proxy.example:8080:{auth}")
 
     def test_parse_scheme_host_port(self):
-        parsed = self.manager.parse_proxy_string("socks5://proxy.example:1080")
+        self.assertEqual(self.manager.parse_proxy_string("socks5://proxy.example:1080"), {
+            "scheme": "socks5", "host": "proxy.example", "port": 1080,
+        })
 
-        self.assertEqual(parsed["scheme"], "socks5")
-        self.assertEqual(parsed["host"], "proxy.example")
-        self.assertEqual(parsed["port"], 1080)
-        self.assertFalse(parsed["authenticated"])
-
-    def test_parse_scheme_username_password_host_port(self):
-        parsed = self.manager.parse_proxy_string(
-            "https://user:password@secure-proxy.example:443"
-        )
-
-        self.assertEqual(parsed["scheme"], "https")
-        self.assertEqual(parsed["username"], "user")
-        self.assertEqual(parsed["password"], "password")
-        self.assertTrue(parsed["authenticated"])
-
-    def test_parse_bracketed_ipv6_and_reject_ambiguous_authenticated_ipv6(self):
-        parsed = self.manager.parse_proxy_string("socks5://[2001:db8::1]:1080")
-        self.assertEqual(parsed["host"], "2001:db8::1")
-        self.assertEqual(parsed["port"], 1080)
-
+    def test_parse_scheme_authentication_is_rejected(self):
+        auth = f"{'u' * 5}:{'p' * 7}"
         with self.assertRaises(self.manager.ProxyValidationError):
-            self.manager.parse_proxy_string("2001:db8::1:1080:user:pass")
+            self.manager.parse_proxy_string(f"https://{auth}@proxy.example:443")
+
+    def test_bracketed_ipv6_endpoint_is_supported_and_auth_is_rejected(self):
+        parsed = self.manager.parse_proxy_string("[2001:db8::1]:1080")
+        self.assertEqual(parsed["port"], 1080)
+        self.assertIn("2001:db8::1", parsed["host"])
+
+        auth = f"{'u' * 5}:{'p' * 7}"
+        with self.assertRaises(self.manager.ProxyValidationError):
+            self.manager.parse_proxy_string(f"[2001:db8::1]:1080:{auth}")
 
     def test_parse_invalid_port_and_malformed_string(self):
         for value in (
@@ -344,59 +328,34 @@ class ProxyTests(unittest.TestCase):
 
         self.assertEqual(app.tree.item("profile_0001", "values")[3], "On")
 
-    def test_proxy_secrets_are_not_stored_or_logged(self):
+    def test_proxy_endpoint_is_stored_without_removed_fields(self):
         profiles = self.make_profiles()
-        profile_id = profiles.create_profile("Proxy field safety")
-        self.manager.logger.reset_mock()
+        profile_id = profiles.create_profile("Proxy endpoint")
         profiles.set_proxy(profile_id, True, "http", "proxy.example", 8080)
 
         raw = self.manager.PROFILES_JSON.read_text(encoding="utf-8").casefold()
-        log_calls = repr(self.manager.logger.mock_calls).casefold()
-        self.assertNotIn("proxy_password", raw)
         self.assertNotIn("proxy_username", raw)
-        self.assertNotIn("password", log_calls)
-        self.assertNotIn("secret", log_calls)
-        table_proxy = self.manager.ProfileManagerApp._display_proxy({
-            "proxy_enabled": True,
-            "proxy_scheme": "http",
-            "proxy_host": "proxy.example",
-            "proxy_port": 8080,
-            "proxy_username": "user",
-            "proxy_password": "secret-pass",
-        })
-        self.assertEqual(table_proxy, "On")
-        self.assertNotIn("secret-pass", repr(table_proxy))
-        with self.assertRaises(self.manager.ProxyValidationError) as error:
-            profiles.set_proxy(profile_id, True, "http", "secret-user:secret-pass@proxy.example", 8080)
-        self.assertNotIn("secret-pass", str(error.exception))
+        self.assertNotIn("proxy_password", raw)
+        record = profiles.get_profile_metadata()[0]
+        self.assertEqual(self.manager.proxy_launch_arguments(record), [
+            "--proxy-server=http://proxy.example:8080",
+        ])
+        with self.assertRaises(self.manager.ProxyValidationError):
+            profiles.set_proxy(profile_id, True, "http", "userinfo@proxy.example", 8080)
 
-    def test_proxy_gui_workflow_is_present_and_table_is_safe(self):
-        setup_source = inspect.getsource(self.manager.ProfileManagerApp.setup_ui)
-        self.assertIn('text="Proxy"', setup_source)
-        self.assertIn("command=self.edit_proxy", setup_source)
-        self.assertIn("sidebar_canvas = tk.Canvas", setup_source)
-        self.assertEqual(
-            self.manager.ProfileManagerApp._display_proxy({
-                "proxy_enabled": True,
-                "proxy_scheme": "invalid",
-                "proxy_host": "invalid host",
-                "proxy_port": 80,
-            }),
-            "Off",
-        )
+    def test_proxy_gui_has_endpoint_fields_only(self):
         proxy_source = inspect.getsource(self.manager.ProfileManagerApp.edit_proxy).casefold()
-        self.assertIn("parse_proxy_string", proxy_source)
-        self.assertIn("authenticated proxy launch and storage are not supported in m8", proxy_source)
-        self.assertNotIn("proxy_password", proxy_source)
-        self.assertNotIn("proxy_username", proxy_source)
+        self.assertIn("host", proxy_source)
+        self.assertIn("port", proxy_source)
+        self.assertNotIn("username_var", proxy_source)
+        self.assertNotIn("password_var", proxy_source)
 
-    def test_authenticated_proxy_support_is_reported_truthfully(self):
-        parsed = self.manager.parse_proxy_string("http://user:password@proxy.example:8080")
-        self.assertTrue(parsed["authenticated"])
-        self.assertIn(
-            "authenticated proxy launch and storage are not supported in M8",
-            inspect.getsource(self.manager.ProfileManagerApp.edit_proxy),
-        )
+    def test_authenticated_proxy_syntax_is_rejected_without_echoing_input(self):
+        auth = f"{'u' * 5}:{'p' * 7}"
+        value = f"http://{auth}@proxy.example:8080"
+        with self.assertRaises(self.manager.ProxyValidationError) as error:
+            self.manager.parse_proxy_string(value)
+        self.assertNotIn(value, str(error.exception))
 
     def test_mobile_default_dpr_is_practical_and_mobile_flags_remain_enabled(self):
         profiles = self.make_profiles()

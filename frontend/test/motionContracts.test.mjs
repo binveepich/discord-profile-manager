@@ -44,3 +44,15 @@ test("JS exit timers match the CSS duration tokens", () => {
   assert.equal(root["--motion-duration-instant"], `${durations.instant}ms`);
   assert.match(declarations(".popup-exit").animation, /var\(--motion-duration-fast\)/);
 });
+
+test("theme swap turns every transition off, including overlays rendered outside the app root", () => {
+  assert.equal(declarations(":root.theme-swap *").transition, "none !important");
+});
+
+test("the static app root carries no filter, transform or will-change between theme switches", () => {
+  // themeTransition.js sets these only while a switch runs and clears them afterwards.
+  const shell = declarations(".app-shell");
+  assert.equal(shell.filter, undefined);
+  assert.equal(shell.transform, undefined);
+  assert.equal(shell["will-change"], undefined);
+});

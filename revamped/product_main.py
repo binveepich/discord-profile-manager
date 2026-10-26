@@ -32,9 +32,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     root = Path(args.root).absolute()
     composition = compose_product_candidate(root)
-    composition.profile_service.initialize_metadata()
     api = ProductAPI(composition)
     if args.no_gui:
+        # The window path leaves the catalog write to the loading splash, which runs it after the window is shown.
+        composition.profile_service.initialize_metadata()
         print(f"{PRODUCT_DISPLAY_NAME} ready: {root}")
         print(f"Profiles: {len(api.list_profiles())}")
         print(f"Runtime: {api.get_runtime_info()['browser_version']}")

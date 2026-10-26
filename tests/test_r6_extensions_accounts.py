@@ -112,16 +112,16 @@ class R6Tests(unittest.TestCase):
 
         self.assertEqual(
             [path.name for path in first_paths],
-            ["discord-autofill-extension", "discord-token-extractor-extension"],
+            ["discord-autofill-extension"],
         )
         self.assertEqual(
             [path.name for path in second_paths],
-            ["discord-autofill-extension", "discord-token-extractor-extension"],
+            ["discord-autofill-extension"],
         )
-        self.assertTrue(
+        self.assertFalse(
             (first_profile / "Unpacked Extensions" / "discord-token-extractor-extension").exists()
         )
-        self.assertTrue(
+        self.assertFalse(
             (second_profile / "Unpacked Extensions" / "discord-token-extractor-extension").exists()
         )
         self.assertFalse(extensions.get_registry_state()["quarantined"])

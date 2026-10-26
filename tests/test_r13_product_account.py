@@ -123,7 +123,7 @@ class R13ProductAccountTests(unittest.TestCase):
         load = next(argument for argument in commands[-1] if argument.startswith("--load-extension="))
         self.assertEqual(
             {Path(item).name for item in load.split("=", 1)[1].split(",")},
-            {"discord-autofill-extension", "discord-token-extractor-extension"},
+            {"discord-autofill-extension"},
         )
         config = (
             application.extension_service.profile_extension_path(profile_id) / "config.js"

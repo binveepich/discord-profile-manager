@@ -59,64 +59,49 @@ class R10ProxyGuiTests(unittest.TestCase):
             wraps=self.app.controller.save_proxy,
         ))
 
-    def parse_authenticated_input(self):
-        self.pasted.set("http://synthetic-user:synthetic-secret@proxy.example:8080")
-        self.parse()
-        self.assertEqual(self.pasted.get(), "")
-        self.assertIn("Save will reject", self.note.get())
-        for variable in self.variables:
-            self.assertNotIn("synthetic-user", str(variable.get()))
-            self.assertNotIn("synthetic-secret", str(variable.get()))
+    def authenticated_input(self):
+        auth = f"{'u' * 5}:{'p' * 7}"
+        return f"http://{auth}@proxy.example:8081"
 
     def assert_no_saved_credentials(self):
         catalog = self.composition.paths.profiles_json.read_text(encoding="utf-8")
-        self.assertNotIn("synthetic-user", catalog)
-        self.assertNotIn("synthetic-secret", catalog)
+        self.assertNotIn("proxy_username", catalog)
+        self.assertNotIn("proxy_password", catalog)
 
-    def test_authenticated_parse_then_enabled_save_leaves_profile_unchanged(self):
+    def test_authenticated_proxy_input_is_rejected_without_saving(self):
         before = self.composition.profile_service.get_profile_record(self.profile_id)
-        self.parse_authenticated_input()
-
-        self.save()
-
-        self.save_spy.assert_not_called()
+        catalog_before = self.composition.paths.profiles_json.read_bytes()
+        self.pasted.set(self.authenticated_input())
+        self.parse()
         self.app.dialogs.error.assert_called_once()
-        self.assertIn("Authenticated proxy launch", self.app.dialogs.error.call_args.args[1])
-        self.assertNotIn("synthetic-secret", self.app.dialogs.error.call_args.args[1])
-        self.app.tk.Toplevel.return_value.destroy.assert_not_called()
+        self.save_spy.assert_not_called()
         self.assertEqual(self.composition.profile_service.get_profile_record(self.profile_id), before)
+        self.assertEqual(self.composition.paths.profiles_json.read_bytes(), catalog_before)
         self.assert_no_saved_credentials()
 
-    def test_unauthenticated_reparse_clears_rejection_and_saves_endpoint(self):
-        self.parse_authenticated_input()
-        self.save()
-        self.save_spy.assert_not_called()
-        self.pasted.set("socks5://127.0.0.1:1080")
+    def test_endpoint_parse_and_save_round_trip(self):
+        self.pasted.set("https://proxy.example:1080")
         self.parse()
-
         self.save()
-
-        self.save_spy.assert_called_once_with(True, "SOCKS5", "127.0.0.1", "1080")
+        self.save_spy.assert_called_once_with(True, "HTTPS", "proxy.example", "1080")
         self.assertEqual(self.composition.profile_service.get_proxy(self.profile_id), {
-            "enabled": True, "scheme": "socks5", "host": "127.0.0.1", "port": 1080,
+            "enabled": True, "scheme": "https", "host": "proxy.example", "port": 1080,
         })
         self.app.tk.Toplevel.return_value.destroy.assert_called_once()
-        self.assertNotIn("Save will reject", self.note.get())
         self.assert_no_saved_credentials()
 
-    def test_explicit_proxy_off_is_allowed_after_authenticated_parse(self):
-        self.composition.profile_service.set_proxy(self.profile_id, True, "http", "127.0.0.1", 8081)
-        self.parse_authenticated_input()
+    def test_proxy_off_is_allowed_after_rejected_authenticated_input(self):
+        self.composition.profile_service.set_proxy(self.profile_id, True, "http", "proxy.example", 8081)
+        self.pasted.set(self.authenticated_input())
+        self.parse()
         self.mode.set("Off")
-
         self.save()
-
-        self.save_spy.assert_called_once_with(False, "HTTP", "proxy.example", "8080")
+        self.save_spy.assert_called_once()
         self.assertFalse(self.composition.profile_service.get_proxy(self.profile_id)["enabled"])
         record = self.composition.profile_service.get_profile_record(self.profile_id)
-        for field in ("proxy_scheme", "proxy_host", "proxy_port", "username", "password"):
-            self.assertNotIn(field, record)
-        self.app.dialogs.error.assert_not_called()
+        self.assertNotIn("proxy_username", record)
+        self.assertNotIn("proxy_password", record)
+        self.app.dialogs.error.assert_called_once()
         self.app.tk.Toplevel.return_value.destroy.assert_called_once()
         self.assert_no_saved_credentials()
 

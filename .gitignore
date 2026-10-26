@@ -77,6 +77,13 @@ Desktop.ini
 *accounts*.txt
 *accounts*.csv
 
+# Local proxy lists and root-level scratch checks
+proxies*.txt
+*proxies*.txt
+working_proxies*.txt
+/test_proxies.py
+/test_profile_proxy.py
+
 # Screenshots and recordings that may show accounts
 screenshots/
 recordings/

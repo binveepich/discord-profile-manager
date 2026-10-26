@@ -70,7 +70,7 @@ evidence.
 1. From project root, run:
 
 ```powershell
-python -B main.py
+python -B main.py --legacy
 ```
 
 2. Confirm the manager window opens.
@@ -318,8 +318,8 @@ Notes:
 Close manager and run:
 
 ```powershell
-Set-Location -LiteralPath 'I:\Discord_Profile_Manager\config'
-python -B '..\main.py'
+Set-Location -LiteralPath '<REPO>\config'
+python -B '..\main.py' --legacy
 ```
 
 If `..\main.py` does not resolve from that location, run the compatible legacy command:

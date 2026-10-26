@@ -250,18 +250,23 @@ class R11RuntimeSettingsTests(unittest.TestCase):
     def test_unified_runtime_settings_reject_proxy_auth_without_changing_profile(self):
         before = self.application.profile_service.get_profile_record(self.profile_id)
 
-        with self.assertRaises(ProxyValidationError):
-            self.application.profile_service.save_runtime_settings(
-                self.profile_id,
-                "windows_chromium",
-                proxy_config={
-                    "enabled": True,
-                    "scheme": "http",
-                    "host": "proxy.example",
-                    "port": 8080,
-                    "username": "synthetic-user",
-                },
-            )
+        for credentials in (
+            {"username": "synthetic-user"},
+            {"username": "synthetic-user", "password": "synthetic-password"},
+        ):
+            with self.subTest(credential_fields=sorted(credentials)):
+                with self.assertRaises(ProxyValidationError):
+                    self.application.profile_service.save_runtime_settings(
+                        self.profile_id,
+                        "windows_chromium",
+                        proxy_config={
+                            "enabled": True,
+                            "scheme": "http",
+                            "host": "proxy.example",
+                            "port": 8080,
+                            **credentials,
+                        },
+                    )
 
         self.assertEqual(
             self.application.profile_service.get_profile_record(self.profile_id), before

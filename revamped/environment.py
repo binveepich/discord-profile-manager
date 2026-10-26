@@ -630,37 +630,19 @@ def _normalize_work_area(value):
     return left, top, right, bottom
 
 
-def profile_id_numeric_suffix(profile_id):
-    """Return a trailing numeric suffix, or ``None`` if the ID has none."""
-    match = re.search(r"(\d+)$", "" if profile_id is None else str(profile_id))
-    if not match:
-        return None
-    try:
-        number = int(match.group(1))
-    except (TypeError, ValueError):
-        return None
-    return number
+def window_slot_for_position(position):
+    """Return the window side for a 1-based STT position: odd left (0), even right (1).
 
-
-def profile_window_slot(profile_id):
-    """Return the stable side for a profile ID: odd IDs left, even IDs right.
-
-    Nonstandard or malformed IDs safely fall back to the left side. Display
-    ordering, saved environment metadata, and the mutable table STT are not
-    inputs to this decision.
+    STT is the table's display position, so the side follows what the user sees.
+    A missing or non-integer position falls back to the left side.
     """
-    number = profile_id_numeric_suffix(profile_id)
-    if number is None:
+    if isinstance(position, bool) or not isinstance(position, int) or position < 1:
         return 0
-    return (number - 1) % 2
+    return (position - 1) % 2
 
 
-def product_window_bounds(profile_id=None, *, work_area=None, slot=None):
-    """Calculate an on-screen half-work-area Chromium rectangle.
-
-    ``slot`` remains an ignored compatibility argument. Placement always
-    follows the stable numeric suffix of ``profile_id``.
-    """
+def product_window_bounds(position=None, *, work_area=None):
+    """Calculate an on-screen half-work-area Chromium rectangle for one STT position."""
     left, top, right, bottom = (
         _normalize_work_area(work_area)
         or _normalize_work_area(get_windows_work_area())
@@ -673,7 +655,7 @@ def product_window_bounds(profile_id=None, *, work_area=None, slot=None):
     gap = min(PRODUCT_WINDOW_GAP, max(0, total_width // 24))
     usable_width = max(1, total_width - (2 * margin_x) - gap)
     usable_height = max(1, total_height - (2 * margin_y))
-    slot = profile_window_slot(profile_id)
+    slot = window_slot_for_position(position)
     left_width = max(1, usable_width // 2)
     right_width = max(1, usable_width - left_width)
     width = left_width if slot == 0 else right_width
@@ -692,8 +674,8 @@ def product_window_bounds(profile_id=None, *, work_area=None, slot=None):
     }
 
 
-def product_window_placement_arguments(profile_id, *, work_area=None):
-    """Build only the global left/right window-placement flags for a profile."""
+def product_window_placement_arguments(position, *, work_area=None):
+    """Build only the global left/right window-placement flags for one STT position."""
     target_area = _normalize_work_area(work_area) or _normalize_work_area(
         get_windows_work_area()
     )
@@ -701,7 +683,7 @@ def product_window_placement_arguments(profile_id, *, work_area=None):
         # Leave placement to Chromium if Windows cannot report any display
         # geometry; never pass hard-coded bounds that may be off-screen.
         return []
-    bounds = product_window_bounds(profile_id, work_area=target_area)
+    bounds = product_window_bounds(position, work_area=target_area)
     return [
         f"--window-size={bounds['width']},{bounds['height']}",
         f"--window-position={bounds['x']},{bounds['y']}",
@@ -1339,7 +1321,7 @@ def environment_launch_arguments(record):
     return arguments
 
 
-def product_environment_details(record, *, work_area=None):
+def product_environment_details(record, *, work_area=None, position=None):
     """Return the product-only environment view without legacy DPR coupling."""
     record = record if isinstance(record, dict) else {}
     preset = normalize_environment_preset(record.get("environment_preset"))
@@ -1353,7 +1335,7 @@ def product_environment_details(record, *, work_area=None):
     config.pop("viewport_width", None)
     config.pop("viewport_height", None)
     config.pop("window_size_policy", None)
-    bounds = product_window_bounds(record.get("profile_id"), work_area=work_area)
+    bounds = product_window_bounds(position, work_area=work_area)
     field_sources = {
         "user_agent": config.get("user_agent_source") or "applied to Chromium",
         "language": config.get("language_source") or "applied to Chromium",

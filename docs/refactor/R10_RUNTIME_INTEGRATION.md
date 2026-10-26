@@ -12,11 +12,11 @@ Date: 2026-09-17. Scope: connect and verify the existing revamped launch path in
 
 Fresh profile creation initialized the profile directory, Preferences, and an empty `Unpacked Extensions/` directory. The open action only enumerated deployments; it did not create them. Deployment was reached through the separate account path: `set_account` → `AccountCompatibilityService.set_account` → `ensure_required_extensions`. A profile without account setup therefore supplied no extension paths. Configuration stopped at the missing deployment step, before command assembly.
 
-There was a second defect: `ensure_required_extensions` required Autofill but silently omitted a second registry extension if its source was missing or invalid. R14 subsequently quarantines the token-extractor source entirely because it is outside the product security boundary.
+R10 also identified that `ensure_required_extensions` did not report an invalid optional source. The current policy keeps the token extractor as an optional discovered source: fresh profiles do not receive it by default, valid existing copies remain in the launch path, and deliberate enablement can deploy it to other profiles. Its repository source is excluded from release builds.
 
-**R10 path:** `compose` injects the registry-backed `ExtensionService` into the launcher. After checking the profile exists and is stopped, `launch_discord` calls `ensure_required_extensions`, merges the approved built-in with any enabled optional paths, then builds and executes the command. Account configuration is not required. Clicking Open on an already running profile returns without refreshing its deployed extension files. R14 removes the token-extractor source from this launch path.
+**Current launch path:** `compose` injects the registry-backed `ExtensionService` into the launcher. After checking the profile exists and is stopped, `launch_discord` calls `ensure_enabled_extensions`, which deploys required Autofill and deliberately enabled optional sources. A valid token-extractor copy already in a profile is passed through without refreshing it. Fresh profiles do not get that extension by default. Account configuration is not required. Clicking Open on an already running profile returns without refreshing its deployed extension files.
 
-The registry is `I:\Discord_Profile_Manager\extensions`. The approved Autofill built-in is copied through validated staging into the disposable profile, preserving profile-local `config.js` and extra files. Missing or invalid required sources fail clearly. Deployed directories are validated, including manifest declarations and referenced scripts/icons. Only deployed workspace-local paths enter the extension switches. Repository sources remain untouched. R14 excludes the token-extractor directory from discovery and deployment.
+The registry is `<REPO>\extensions`. Autofill is required and is copied through validated staging into the disposable profile, preserving profile-local `config.js` and extra files. Other valid sources, including the token extractor, are optional; only enabled sources and retained existing copies enter the extension switches. Missing or invalid required sources fail clearly. Deployed directories are validated, including manifest declarations and referenced scripts/icons. Repository sources remain untouched, and the token-extractor source is excluded from release builds.
 
 ### Environment
 
@@ -80,8 +80,8 @@ Each JSON string below is one argv element. There are no account credentials or 
 
 ```json
 [
-  "I:\\Discord_Profile_Manager\\browser\\chrome.exe",
-  "--user-data-dir=I:\\Discord_Profile_Manager\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003",
+  "<REPO>\\browser\\chrome.exe",
+  "--user-data-dir=<REPO>\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003",
   "--new-window",
   "--no-first-run",
   "--no-default-browser-check",
@@ -93,8 +93,8 @@ Each JSON string below is one argv element. There are no account credentials or 
   "--touch-events=enabled",
   "--proxy-server=http://127.0.0.1:64132",
   "https://discord.com/app",
-  "--disable-extensions-except=I:\\Discord_Profile_Manager\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003\\Unpacked Extensions\\discord-autofill-extension",
-  "--load-extension=I:\\Discord_Profile_Manager\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003\\Unpacked Extensions\\discord-autofill-extension"
+  "--disable-extensions-except=<REPO>\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003\\Unpacked Extensions\\discord-autofill-extension",
+  "--load-extension=<REPO>\\tmp\\r10 real runtime l2cs_byr\\profiles\\profile_0003\\Unpacked Extensions\\discord-autofill-extension"
 ]
 ```
 
@@ -117,7 +117,7 @@ For the proxy case the replacement destination is `http://r10-proxy.invalid/r10-
 - `revamped/main.py`: inject the shared extension service into the launcher.
 - `revamped/environment.py`: document existing switch meanings and expose unsupported/limited runtime notes.
 - `revamped/gui.py`: refresh environment preset state, identify unsupported controls, reject authenticated proxy input, and explain when saved changes apply.
-- `tests/test_r6_extensions_accounts.py`: provide the approved built-in and quarantine coverage for prohibited sources.
+- `tests/test_r6_extensions_accounts.py`: cover required Autofill deployment and optional-source discovery without auto-deploying the token extractor.
 - `tests/test_r10_extensions.py`: registry/deployment/real command-assembly checks, missing/invalid source failures, repair, source integrity.
 - `tests/test_r10_environment.py`: saved settings through restart, actual command assembly, editor state, unsupported notes.
 - `tests/test_r10_runtime_integration.py`: composed GUI-to-launch settings, the approved built-in without accounts, Proxy Off, and running-profile deployment guard.

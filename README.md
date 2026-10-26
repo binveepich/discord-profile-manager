@@ -6,30 +6,50 @@ intentionally ignored by Git. The manager does not install or update Chromium.
 
 ## Run
 
-Use Python with Tkinter and the existing `psutil` dependency. The M1 tests were run
-with Python 3.11.8 and psutil 7.2.2 on Windows. If psutil is missing, install it in
-your chosen Python environment with `python -m pip install psutil`.
-
-Preferred source entrypoint from PowerShell:
+Install the Python dependencies once, from the project folder:
 
 ```powershell
-Set-Location -LiteralPath 'I:\Discord_Profile_Manager'
+python -m pip install -r requirements.txt
+```
+
+Build the React frontend once with Node.js, and rebuild it after frontend changes:
+
+```powershell
+Set-Location -LiteralPath '<REPO>\frontend'
+npm ci
+npm run build
+Set-Location -LiteralPath '<REPO>'
+```
+
+Start the product. This is the default entrypoint:
+
+```powershell
+Set-Location -LiteralPath '<REPO>'
 python -B main.py
 ```
 
-The legacy command remains compatible:
+If `frontend/dist/index.html` is missing, `main.py` stops with these build steps
+instead of opening a window. `python -m revamped.product_main` starts the same product.
+
+The legacy Tkinter app is still available, but it is no longer the default. Release builds omit `legacy/`, so `--legacy` works only in the source checkout:
+
+```powershell
+python -B main.py --legacy
+```
+
+The direct legacy command also remains compatible:
 
 ```powershell
 python -B .\legacy\profile_manager.py
 ```
 
-`main.py` is a thin wrapper; the current implementation remains in
-`legacy/profile_manager.py`. The implementation resolves browser and extension
-source paths relative to the project root, independent of the working directory.
-If `browser/chrome.exe` is missing
-or is a directory instead of a file, startup displays the expected full path and
-returns after the error dialog is dismissed. A missing runtime encountered when
-opening a profile uses the existing GUI error dialog.
+The legacy app needs Tkinter and the existing `psutil` dependency. The M1 tests were
+run with Python 3.11.8 and psutil 7.2.2 on Windows. The legacy app resolves browser
+and extension source paths relative to the project root, independent of the working
+directory. If `browser/chrome.exe` is missing or is a directory instead of a file,
+startup displays the expected full path and returns after the error dialog is
+dismissed. A missing runtime encountered when opening a profile uses the existing GUI
+error dialog.
 
 ## Packaging status
 
@@ -76,12 +96,13 @@ fingerprint spoofing.
 
 ## React product candidate
 
-The daily-use source candidate is available without changing the rollback-safe
-root `main.py`. It uses React/Vite/Tailwind in `frontend/`, hosted by pywebview,
-with Python `revamped/product_api.py` as the authoritative bridge. Build it with
-`npm install` and `npm run build` from `frontend/`, then run
-`python -m revamped.product_main`. See [docs/PRODUCT_CANDIDATE.md](docs/PRODUCT_CANDIDATE.md)
-for the account, proxy, export, backup, and snapshot behavior.
+The daily-use source candidate is the default startup of the root `main.py` (see
+Run above). It uses React/Vite/Tailwind in `frontend/`, hosted by pywebview, with
+Python `revamped/product_api.py` as the authoritative bridge. Build it with
+`npm ci` and `npm run build` from `frontend/`, then run `python -B main.py`;
+`python -m revamped.product_main` starts the same product. See
+[docs/PRODUCT_CANDIDATE.md](docs/PRODUCT_CANDIDATE.md) for the account, proxy,
+export, backup, and snapshot behavior.
 
 ## M7 environment behavior
 
@@ -109,10 +130,12 @@ for the account, proxy, export, backup, and snapshot behavior.
 
 ## M5 extension behavior
 
-- Account setup deploys only the approved autofill extension using staged
-   per-profile copies, then writes only the selected profile's autofill
-   `config.js`. The bundled token-extractor source is quarantined and is never
-   required, enabled, staged, or launched.
+- The required Autofill extension is deployed to every profile on launch
+  using staged per-profile copies; account setup writes only the selected
+  profile's Autofill `config.js`. The token extractor is optional and is not
+  deployed by default; it must be enabled deliberately per profile. Existing
+  profile copies are preserved and remain loadable. Its source stays in the
+  repository but is excluded from release builds.
 - Other valid extensions in the registry remain available for explicit future
    default policies without adding another hard-coded deployment path.
 - Existing profile deployments are compatible across manager restarts. Missing or
@@ -132,8 +155,9 @@ decision (or the `compose_product()` API); it refuses unmarked existing state
 and never infers the repository's live `profiles/` or `config/` directories.
 Product mode persists only an account label and non-sensitive identifier.
 Passwords, tokens, TOTP secrets, sessions, cookies, and equivalent fields are
-rejected. The R14 product boundary remains a parallel/dev-only composition;
-the root `main.py` and packaging are unchanged and locked.
+rejected. The R14 product boundary remains a parallel/dev-only composition.
+The root `main.py` now starts the React product for beta (see Run above), and
+packaging remains locked.
 
 When `config/profiles.json` is missing or empty, the manager imports registered
 M1-M3 profiles and discovers valid existing managed profile roots without

@@ -15,7 +15,9 @@ until all of these are demonstrated:
    production Chromium runtime.
 7. Manual GUI/browser/profile acceptance is performed by the user and recorded
    separately; it is never inferred from automated tests.
-8. The stable entrypoint remains rollback-safe and continues to run legacy.
+8. The stable entrypoint is `main.py`, which starts the React product (owner
+   decision, beta prep step 8). Its rollback path is `python main.py --legacy`,
+   which runs the legacy app.
 9. Packaging, runtime updating, secure credential migration, and new product
    features remain locked.
 10. The user explicitly approves any future default-entrypoint switch.

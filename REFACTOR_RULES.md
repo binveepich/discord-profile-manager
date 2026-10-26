@@ -1,7 +1,11 @@
 # Parallel Refactor Rules
 
-1. `legacy/profile_manager.py`, `main.py`, and the existing M1–M8 tests are
-   frozen golden reference files. Never edit, reformat, redirect, or rename them.
+1. `legacy/profile_manager.py` and the existing M1–M8 tests are frozen golden
+   reference files. Never edit, reformat, redirect, or rename them.
+   Superseded for `main.py` by the owner's beta decision (recorded 2026-10-25, beta
+   prep step 8): `main.py` now starts the React product, and `python main.py --legacy`
+   runs the legacy app. Any change to its routing needs an explicit owner decision,
+   recorded as a named milestone in `scripts/check_refactor_integrity.py`.
 2. Never read, print, migrate, repair, delete, or overwrite live `profiles/`,
    `browser/`, `config/profiles.json`, `legacy/data/`, `legacy/log/`, or existing
    profile-local extension deployments.
@@ -15,8 +19,10 @@
    checks, atomic writes, stale-write detection, and failure-path data safety.
 7. Keep account compatibility isolated. Do not redesign or migrate plaintext
    account storage during this refactor, and never log credential values.
-8. Do not switch the stable entrypoint, package the app, launch real Chromium, or
-   perform manual GUI/Discord acceptance as part of autonomous work.
+8. Do not change the stable entrypoint's routing (`main.py` to the product,
+   `--legacy` to the legacy app) without an explicit owner decision. Do not package
+   the app, launch real Chromium, or perform manual GUI/Discord acceptance as part
+   of autonomous work.
 9. Stage explicit files only. Never use broad Git staging, cleanup, reset, or
    history-rewrite commands.
 10. A milestone is complete only after its stated gate and the frozen legacy gate

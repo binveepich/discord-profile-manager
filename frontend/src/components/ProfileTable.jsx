@@ -1,11 +1,12 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { memo, useLayoutEffect, useRef, useState } from "react";
 import { Edit3, ExternalLink, MoreHorizontal } from "lucide-react";
 import ActionTooltip from "./ActionTooltip";
 import StatusBadge from "./StatusBadge";
 import { formatDate } from "../i18n";
 import { exitMotionDuration } from "../motion";
+import { formatProfileSttSubLabel } from "../profileSubLabel";
 
-export default function ProfileTable({ rows, selected, onToggle, onToggleAll, onEdit, onOpen, visibleColumns }) {
+function ProfileTable({ rows, selected, onToggle, onToggleAll, onEdit, onOpen, visibleColumns }) {
   const [exitingRows, setExitingRows] = useState([]);
   const previousRows = useRef(rows);
   const exitTimers = useRef(new Map());
@@ -139,6 +140,7 @@ export default function ProfileTable({ rows, selected, onToggle, onToggleAll, on
           <tbody>
             {displayedRows.map((row, index) => {
               const isSelected = selected.has(row.profile_id);
+              // A row that is leaving keeps its old STT until its exit animation ends, so it shows no STT: that number now belongs to another row.
               const isExiting = exitIds.has(row.profile_id);
               const isEntering = !isExiting && entering.has(row.profile_id);
               return (
@@ -152,10 +154,10 @@ export default function ProfileTable({ rows, selected, onToggle, onToggleAll, on
                   aria-hidden={isExiting || undefined}
                 >
                   <td onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={isSelected} onChange={() => onToggle(row.profile_id)} aria-label={`Chọn ${row.name}`} /></td>
-                  <td className="stt-column font-mono text-xs">{row.stt}</td>
+                  <td className="stt-column font-mono text-xs">{isExiting ? "" : row.stt}</td>
                   <td>
                     <div className="profile-name">{row.name}</div>
-                    <div className="profile-id">{row.profile_id}</div>
+                    <div className="profile-id" title={`ID: ${row.profile_id}`}>{formatProfileSttSubLabel(row.stt)}</div>
                   </td>
                   {columns.has("account") && <td className="account-cell">{row.account || <span className="muted">Chưa có tài khoản</span>}</td>}
                   {columns.has("environment") && <td>
@@ -167,10 +169,10 @@ export default function ProfileTable({ rows, selected, onToggle, onToggleAll, on
                   <td onClick={(event) => event.stopPropagation()}>
                     <div className="row-actions">
                       <ActionTooltip label="Mở hồ sơ">
-                        <button className="row-action row-open" onClick={() => onOpen(row)} aria-label={`Mở ${row.name}`}><ExternalLink className="h-4 w-4" /></button>
+                        <button className="row-action row-open" onClick={() => onOpen(row)} aria-label={`Mở ${row.name}`}><ExternalLink className="h-[18px] w-[18px]" /></button>
                       </ActionTooltip>
                       <ActionTooltip label="Chỉnh sửa hồ sơ">
-                        <button className="row-action" onClick={() => onEdit(row)} aria-label={`Chỉnh sửa ${row.name}`}><Edit3 className="h-4 w-4" /></button>
+                        <button className="row-action" onClick={() => onEdit(row)} aria-label={`Chỉnh sửa ${row.name}`}><Edit3 className="h-[18px] w-[18px]" /></button>
                       </ActionTooltip>
                     </div>
                   </td>
@@ -181,7 +183,9 @@ export default function ProfileTable({ rows, selected, onToggle, onToggleAll, on
         </table>
         {!rows.length && <div className="empty-state"><div className="empty-state-icon"><MoreHorizontal className="h-5 w-5" /></div><p>Không có hồ sơ phù hợp</p><span>Thử thay đổi từ khóa tìm kiếm hoặc tạo hồ sơ mới.</span></div>}
       </div>
-      <div className="table-footer"><span><MoreHorizontal className="mr-2 inline h-4 w-4" />STT và mã hồ sơ được giữ ổn định; sắp xếp chỉ thay đổi cách hiển thị.</span><span>Tối đa 9.999 hồ sơ</span></div>
+      <div className="table-footer"><span><MoreHorizontal className="mr-2 inline h-4 w-4" />STT là vị trí trong thứ tự mặc định; mã hồ sơ được giữ ổn định; sắp xếp chỉ thay đổi cách hiển thị.</span><span>Tối đa 9.999 hồ sơ</span></div>
     </section>
   );
 }
+
+export default memo(ProfileTable);

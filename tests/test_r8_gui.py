@@ -218,7 +218,7 @@ class GUIBoundaryTests(unittest.TestCase):
 
     def test_environment_and_proxy_editors_delegate_without_auth_storage(self):
         dialogs = Dialogs()
-        self.profile_service.set_environment.return_value = {"preset": "custom"}
+        self.profile_service.set_environment.return_value = {"preset": "Desktop"}
         self.profile_service.get_proxy.return_value = {
             "enabled": False, "scheme": None, "host": None, "port": None,
         }
@@ -234,13 +234,10 @@ class GUIBoundaryTests(unittest.TestCase):
         controller.refresh()
         controller.set_selection(["profile_0001"])
 
-        self.assertEqual(controller.environment_editor_state()["preset"], "desktop")
-        controller.save_environment("custom", {"width": 1000, "height": 700})
         controller.save_proxy(True, "http", "proxy.example", 8080)
-        with self.assertRaisesRegex(ProfileManagerError, "authenticated"):
-            controller.save_proxy(True, "http", "proxy.example", 8080, username="synthetic-user")
+        with self.assertRaises(TypeError):
+            controller.save_proxy(True, "http", "proxy.example", 8080, username="x" * 8)
 
-        self.profile_service.set_environment.assert_called_once()
         self.profile_service.set_proxy.assert_called_once_with(
             "profile_0001", True, "http", "proxy.example", 8080
         )

@@ -71,29 +71,6 @@ def _proxy_off_state():
     }
 
 
-def _normalize_proxy_credential(value, field):
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value or len(value) > 320:
-        raise ProxyValidationError(f"Proxy {field} must be non-empty text.")
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise ProxyValidationError(f"Proxy {field} contains invalid characters.")
-    return value
-
-
-def normalize_proxy_credentials(username=None, password=None):
-    """Validate optional credentials for explicit user-owned export/storage."""
-    if username is None and password is None:
-        return {"username": None, "password": None}
-    username = _normalize_proxy_credential(username, "username")
-    password = _normalize_proxy_credential(password, "password")
-    if (username is None) != (password is None):
-        raise ProxyValidationError(
-            "Proxy username and password must be provided together."
-        )
-    return {"username": username, "password": password}
-
-
 def normalize_proxy_config(scheme, host, port):
     """Normalize a complete enabled proxy or return None when malformed."""
     normalized = {
@@ -105,7 +82,7 @@ def normalize_proxy_config(scheme, host, port):
 
 
 def effective_proxy(record):
-    """Return one record's safe proxy state without mutating metadata."""
+    """Return one record's endpoint-only proxy state without mutation."""
     if not isinstance(record, dict) or record.get("proxy_enabled") is not True:
         return _proxy_off_state()
     normalized = normalize_proxy_config(
@@ -113,12 +90,7 @@ def effective_proxy(record):
     )
     if normalized is None:
         return _proxy_off_state()
-    result = {"enabled": True, **normalized}
-    for field in ("username", "password"):
-        value = record.get(f"proxy_{field}")
-        if isinstance(value, str) and value:
-            result[field] = value
-    return result
+    return {"enabled": True, **normalized}
 
 
 def proxy_launch_arguments(record):
@@ -169,13 +141,12 @@ def _parse_proxy_host_port(value, allow_raw_ipv6=True):
 
 
 def parse_proxy_string(value):
-    """Parse common endpoint forms; any credentials remain transient only."""
+    """Parse an unauthenticated proxy endpoint without retaining auth input."""
     if not isinstance(value, str) or not value.strip():
         raise ProxyValidationError("Proxy string is empty.")
     text = value.strip()
-    username = None
-    password = None
     scheme = "http"
+
     if "://" in text:
         scheme_value, authority = text.split("://", 1)
         scheme = normalize_proxy_scheme(scheme_value)
@@ -186,68 +157,19 @@ def parse_proxy_string(value):
         if not authority or any(char in authority for char in "/?#"):
             raise ProxyValidationError("Proxy string contains an invalid authority.")
         if "@" in authority:
-            userinfo, endpoint = authority.split("@", 1)
-            if "@" in endpoint or ":" not in userinfo:
-                raise ProxyValidationError("Authenticated proxy syntax is malformed.")
-            username, password = userinfo.split(":", 1)
-            if not username or not password:
-                raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
-            if endpoint.count(":") > 1 and not endpoint.startswith("["):
-                raise ProxyValidationError("Authenticated IPv6 proxies must use [host]:port syntax.")
-        host, port = _parse_proxy_host_port(
-            endpoint if "@" in authority else authority,
-            allow_raw_ipv6=username is None,
-        )
+            raise ProxyValidationError("Proxy endpoints must not include authentication data.")
+        host, port = _parse_proxy_host_port(authority)
     else:
-        if text.startswith("["):
-            closing = text.find("]")
-            if closing < 0 or not text[closing + 1:].startswith(":"):
-                raise ProxyValidationError("IPv6 proxy hosts must use [host]:port syntax.")
-            host_value = text[:closing + 1]
-            suffix = text[closing + 2:]
-            fields = suffix.split(":", 2)
-            if len(fields) == 1:
-                port_value = fields[0]
-            elif len(fields) == 3:
-                port_value, username, password = fields
-                if not username or not password:
-                    raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
-            else:
-                raise ProxyValidationError("Authenticated proxy syntax is malformed.")
-            host, port = _parse_proxy_host_port(
-                f"{host_value}:{port_value}", allow_raw_ipv6=False
-            )
-        elif text.count(":") > 1:
+        if "@" in text:
+            raise ProxyValidationError("Proxy endpoints must not include authentication data.")
+        if text.count(":") > 1 and not text.startswith("["):
             try:
                 host, port = _parse_proxy_host_port(text, allow_raw_ipv6=True)
-            except ProxyValidationError:
-                fields = text.split(":", 3)
-                if len(fields) != 4:
-                    raise
-                host, port = _parse_proxy_host_port(
-                    f"{fields[0]}:{fields[1]}", allow_raw_ipv6=False
-                )
-                username, password = fields[2], fields[3]
-                if not username or not password:
-                    raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
+            except ProxyValidationError as error:
+                raise ProxyValidationError(
+                    "Proxy input must be an unauthenticated host:port endpoint."
+                ) from error
         else:
-            fields = text.split(":", 3)
-            if len(fields) == 2:
-                host, port = _parse_proxy_host_port(text, allow_raw_ipv6=False)
-            elif len(fields) == 4:
-                host, port = _parse_proxy_host_port(
-                    f"{fields[0]}:{fields[1]}", allow_raw_ipv6=False
-                )
-                username, password = fields[2], fields[3]
-                if not username or not password:
-                    raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
-            else:
-                raise ProxyValidationError("Proxy string must use host:port syntax.")
-    return {
-        "scheme": scheme,
-        "host": host,
-        "port": port,
-        "username": username,
-        "password": password,
-        "authenticated": username is not None or password is not None,
-    }
+            host, port = _parse_proxy_host_port(text, allow_raw_ipv6=False)
+
+    return {"scheme": scheme, "host": host, "port": port}

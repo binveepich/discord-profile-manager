@@ -14,9 +14,10 @@ Tests: `tests\test_import_legacy_profiles.py` (synthetic installs only)
 In this guide:
 
 - `<STATE_ROOT>` is the revamped state root. The React app uses the repository folder,
-  `H:\Discord_Profile_Manager`, by default. It holds `config\`, `profiles\`, and `data\`.
+  `<REPO>`, by default. It holds `config\`, `profiles\`, and `data\`.
 - `<LEGACY_INSTALL>` is a legacy portable install folder: the folder that contains
-  `data\Local State`, for example `H:\FFA Discord\ungoogled-chromium-portable`.
+  `data\Local State`. In examples, `<LEGACY_SOURCE_1>` and `<LEGACY_SOURCE_2>`
+  stand for the user's first and second legacy install roots.
 
 ## 1. Prerequisites
 
@@ -49,11 +50,11 @@ Always run from the repository root.
 ## 3. Dry run (writes nothing)
 
 ```powershell
-cd H:\Discord_Profile_Manager
+cd <REPO>
 python -B scripts\import_legacy_profiles.py `
-  --root "H:\Discord_Profile_Manager" `
-  --source "H:\FFA Discord\ungoogled-chromium-portable" `
-  --source "H:\OLD FFA Discord\ungoogled-chromium-portable" `
+  --root "<REPO>" `
+  --source "<LEGACY_SOURCE_1>\ungoogled-chromium-portable" `
+  --source "<LEGACY_SOURCE_2>\ungoogled-chromium-portable" `
   --skip-caches --include-orphans `
   --report "logs\legacy-import\dry-run.json"
 ```
@@ -68,9 +69,9 @@ every skipped profile with its reason. Exit code `0` means the plan is clean. Ex
 Test first with a small batch:
 
 ```powershell
-python -B scripts\import_legacy_profiles.py --root "H:\Discord_Profile_Manager" `
-  --source "H:\FFA Discord\ungoogled-chromium-portable" `
-  --source "H:\OLD FFA Discord\ungoogled-chromium-portable" `
+python -B scripts\import_legacy_profiles.py --root "<REPO>" `
+  --source "<LEGACY_SOURCE_1>\ungoogled-chromium-portable" `
+  --source "<LEGACY_SOURCE_2>\ungoogled-chromium-portable" `
   --skip-caches --include-orphans --limit 3 --apply
 ```
 
@@ -78,9 +79,9 @@ Then confirm the app lists them (section 5). Then run the full batch with the sa
 options minus `--limit`:
 
 ```powershell
-python -B scripts\import_legacy_profiles.py --root "H:\Discord_Profile_Manager" `
-  --source "H:\FFA Discord\ungoogled-chromium-portable" `
-  --source "H:\OLD FFA Discord\ungoogled-chromium-portable" `
+python -B scripts\import_legacy_profiles.py --root "<REPO>" `
+  --source "<LEGACY_SOURCE_1>\ungoogled-chromium-portable" `
+  --source "<LEGACY_SOURCE_2>\ungoogled-chromium-portable" `
   --skip-caches --include-orphans --apply
 ```
 
@@ -97,7 +98,7 @@ profiles, not the same three.
 
    ```powershell
    $env:PYTHONIOENCODING = "utf-8"
-   python -B -m revamped.product_main --no-gui --root "H:\Discord_Profile_Manager"
+   python -B -m revamped.product_main --no-gui --root "<REPO>"
    ```
 
    It prints `Profiles: N`. This startup path does not launch Chromium.
@@ -135,9 +136,10 @@ lost there. Chromium caches are dropped only when `--skip-caches` is used.
 
 ## 7. Known issues to decide before launching imported profiles
 
-- The copied profiles contain `discord-token-extractor-extension`. The revamped app
-  currently loads that extension on launch, which conflicts with the project rules in
-  `AGENTS.md` and `README.md`. Decide and fix that before you launch any imported profile.
+- Imported profiles may already contain the optional `discord-token-extractor-extension`.
+  Valid existing copies are preserved and may load; fresh profiles do not receive it by
+  default. Its source remains in the repository but is excluded from release builds.
+  Review an imported profile's extension state before launch if you do not want it enabled.
 - The autofill extension fills Discord's login form with each profile's stored email,
   password, and TOTP when a profile opens on discord.com.
 

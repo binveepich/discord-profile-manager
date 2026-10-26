@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal, flushSync } from "react-dom";
 import { BridgeNotReadyError, call, hasNativeBridge, onBridgeReady } from "./api/bridge";
 import Header from "./components/Header";
 import ProfileTable from "./components/ProfileTable";
@@ -9,9 +10,10 @@ import BatchImportDialog from "./dialogs/BatchImportDialog";
 import ProxyCheckDialog from "./dialogs/ProxyCheckDialog";
 import SettingsPage from "./pages/SettingsPage";
 import AboutPage from "./pages/AboutPage";
-import { applyProfileDeltaToRows } from "./profileDelta";
+import { applyProfileDeltaToRows, applyProfileOrder, deltaMovesRows } from "./profileDelta";
 import { launchBatchOutcome, launchPollFailureState } from "./jobOutcome";
-import { applyReduceMotionAttribute, normalizePreferences, readLocalPreferences, readLocalReduceMotionExplicit, resolveReduceMotionPreference, writeLocalPreferences } from "./uiPreferences";
+import { applyReduceMotionAttribute, mergeSavedPreferences, normalizePreferences, readLocalPreferences, readLocalReduceMotionExplicit, resolveReduceMotionPreference, writeLocalPreferences } from "./uiPreferences";
+import { createThemeTransition } from "./themeTransition";
 import { UI, formatCount, userError } from "./i18n";
 
 const DEMO_ROWS = [{
@@ -37,25 +39,51 @@ function filterAndSortProfiles(rows, query, sort) {
   return [...filtered].sort((left, right) => compareText(value(left), value(right)) || compareText(left.stt, right.stt));
 }
 
-export default function App() {
-  const [profiles, setProfiles] = useState([]);
+// `boot` holds what the loading splash read before the app mounted. Each item is used only when it loaded; otherwise
+// the app asks for it on mount, as it always did.
+export default function App({ boot = null, covered = false, onMounted }) {
+  const [profiles, setProfiles] = useState(() => boot?.profiles ?? []);
+  const profilesRef = useRef(profiles);
+  profilesRef.current = profiles;
+  const orderRequest = useRef(0);
   const [selected, setSelected] = useState(new Set());
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("stt");
   const [refreshing, setRefreshing] = useState(false);
   const [modal, setModal] = useState(null);
   const [toasts, setToasts] = useState([]);
-  const [runtime, setRuntime] = useState(null);
+  const [runtime, setRuntime] = useState(() => boot?.runtime ?? null);
   const [bridgeReady, setBridgeReady] = useState(hasNativeBridge);
   const [delay, setDelay] = useState("2");
   const [batch, setBatch] = useState(null);
   const [deleteInFlight, setDeleteInFlight] = useState(false);
-  const [preferences, setPreferences] = useState(readLocalPreferences);
-  const [reduceMotionExplicit, setReduceMotionExplicit] = useState(readLocalReduceMotionExplicit);
+  const [preferences, setPreferences] = useState(() => (boot?.preferences
+    ? mergeSavedPreferences(readLocalPreferences(), boot.preferences, readLocalReduceMotionExplicit())
+    : readLocalPreferences()));
+  const [reduceMotionExplicit, setReduceMotionExplicit] = useState(() => {
+    const local = readLocalReduceMotionExplicit();
+    return local === null && boot?.preferences?.reduce_motion === true ? true : local;
+  });
   const reduceMotionExplicitRef = useRef(reduceMotionExplicit);
   reduceMotionExplicitRef.current = reduceMotionExplicit;
   const [osReduceMotion, setOsReduceMotion] = useState(() => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches || false);
   const lastErrorToast = useRef(null);
+  const shellRef = useRef(null);
+  // The theme the UI shows. It changes at the swap point of a switch, while `preferences.theme` (the saved choice) changes on click.
+  const [visualTheme, setVisualTheme] = useState(() => preferences.theme);
+  const [themeSwitch] = useState(() => createThemeTransition({
+    getStage: () => shellRef.current,
+    root: document.documentElement,
+    commit: (theme) => {
+      const root = document.documentElement;
+      root.dataset.theme = theme;
+      root.style.colorScheme = theme;
+      const themeColor = document.querySelector('meta[name="theme-color"]');
+      if (themeColor) themeColor.content = getComputedStyle(root).getPropertyValue("--color-ink").trim();
+      setVisualTheme(theme);
+    },
+    flushCommit: flushSync,
+  }));
 
   const notify = useCallback((message, type = "success") => {
     const normalized = String(message || (type === "error" ? "Không thể hoàn tất thao tác." : "Đã hoàn tất."));
@@ -70,6 +98,19 @@ export default function App() {
     setPreferences((current) => normalizePreferences({ ...current, ...changes }));
   }, []);
 
+  // The splash's soft warnings are announced once, after the app is shown.
+  const noticeShown = useRef(false);
+  useEffect(() => {
+    if (!boot?.notice || noticeShown.current) return;
+    noticeShown.current = true;
+    notify(boot.notice, "warning");
+  }, [boot, notify]);
+
+  // The splash waits for this call, which means the app has rendered behind it.
+  useLayoutEffect(() => {
+    onMounted?.();
+  }, []);
+
   useEffect(() => {
     let active = true;
     const unsubscribe = onBridgeReady(() => {
@@ -82,28 +123,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!bridgeReady) return undefined;
+    if (!bridgeReady || boot?.preferences) return undefined;
     let active = true;
     call("get_ui_preferences").then((saved) => {
       if (!active || !saved || !Object.keys(saved).length) return;
       const localChoice = reduceMotionExplicitRef.current ?? readLocalReduceMotionExplicit();
-      setPreferences((current) => normalizePreferences({
-        ...current,
-        ...saved,
-        reduce_motion: localChoice === null && saved.reduce_motion !== true ? current.reduce_motion : saved.reduce_motion,
-      }));
+      setPreferences((current) => mergeSavedPreferences(current, saved, localChoice));
       if (localChoice === null && saved.reduce_motion === true) setReduceMotionExplicit(true);
     }).catch(() => {});
     return () => { active = false; };
   }, [bridgeReady]);
 
+  // Saved or startup preferences apply at once. A click's switch is applied by themeSwitch at its swap point.
   useEffect(() => {
-    const root = document.documentElement;
-    root.dataset.theme = preferences.theme;
-    root.style.colorScheme = preferences.theme;
-    const themeColor = document.querySelector('meta[name="theme-color"]');
-    if (themeColor) themeColor.content = getComputedStyle(root).getPropertyValue("--color-ink").trim();
-  }, [preferences.theme]);
+    themeSwitch.sync(preferences.theme);
+  }, [preferences.theme, themeSwitch]);
 
   useEffect(() => {
     const media = window.matchMedia?.("(prefers-reduced-motion: reduce)");
@@ -138,13 +172,30 @@ export default function App() {
     } finally { setRefreshing(false); }
   }, [notify]);
 
+  // STT is the backend's table position. A change that moves rows also moves the STT of rows it does not touch, so the
+  // whole order is taken again. Only the newest answer is applied.
+  const syncDisplayOrder = useCallback(async () => {
+    const request = orderRequest.current + 1;
+    orderRequest.current = request;
+    try {
+      const order = await call("display_order");
+      if (request !== orderRequest.current) return;
+      if (!Array.isArray(order)) throw new TypeError("display_order did not return a list.");
+      setProfiles((current) => applyProfileOrder(current, order));
+    } catch (error) {
+      if (!(error instanceof BridgeNotReadyError)) notify("Đã cập nhật bảng nhưng STT chưa đồng bộ. Hãy bấm Làm mới để đồng bộ lại.", "error");
+    }
+  }, [notify]);
+
   const applyProfileDelta = useCallback((updates = [], removedIds = []) => {
     if (!Array.isArray(updates) || !updates.every((row) => row && typeof row.profile_id === "string" && typeof row.name === "string")) return false;
     const removals = new Set((Array.isArray(removedIds) ? removedIds : []).map(String));
+    const moves = deltaMovesRows(profilesRef.current, updates, removedIds);
     setProfiles((current) => applyProfileDeltaToRows(current, updates, removedIds));
     if (removals.size) setSelected((current) => new Set([...current].filter((id) => !removals.has(id))));
+    if (moves) syncDisplayOrder();
     return true;
-  }, []);
+  }, [syncDisplayOrder]);
 
   const handleProfileSaved = useCallback((row) => {
     if (!applyProfileDelta([row])) notify("Đã lưu hồ sơ nhưng bảng chưa thể cập nhật. Hãy bấm Làm mới để đồng bộ lại.", "error");
@@ -161,7 +212,8 @@ export default function App() {
 
   useEffect(() => {
     if (bridgeReady) {
-      loadProfiles();
+      // The splash has already loaded the table, so the first load is skipped when it did.
+      if (!boot) loadProfiles();
       return undefined;
     }
     if (import.meta.env.DEV && !hasNativeBridge()) setProfiles(DEMO_ROWS);
@@ -185,14 +237,19 @@ export default function App() {
   }, [bridgeReady]);
 
   useEffect(() => {
-    if (bridgeReady) call("get_runtime_info").then(setRuntime).catch(() => {});
+    if (bridgeReady && !boot?.runtime) call("get_runtime_info").then(setRuntime).catch(() => {});
   }, [bridgeReady]);
 
   const visibleProfiles = useMemo(() => filterAndSortProfiles(profiles, query, sort), [profiles, query, sort]);
   const selectedRows = useMemo(() => profiles.filter((row) => selected.has(row.profile_id)), [profiles, selected]);
   const selectedProfile = selectedRows.length === 1 ? selectedRows[0] : null;
-  const toggle = (id) => setSelected((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next; });
-  const toggleAll = () => setSelected((current) => visibleProfiles.length > 0 && visibleProfiles.every((row) => current.has(row.profile_id)) ? new Set([...current].filter((id) => !visibleProfiles.some((row) => row.profile_id === id))) : new Set([...current, ...visibleProfiles.map((row) => row.profile_id)]));
+  // The table receives these callbacks and column list by identity; keeping them stable lets the memoized table skip renders
+  // caused by unrelated state such as the theme.
+  const toggle = useCallback((id) => setSelected((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next; }), []);
+  const toggleAll = useCallback(() => setSelected((current) => visibleProfiles.length > 0 && visibleProfiles.every((row) => current.has(row.profile_id)) ? new Set([...current].filter((id) => !visibleProfiles.some((row) => row.profile_id === id))) : new Set([...current, ...visibleProfiles.map((row) => row.profile_id)])), [visibleProfiles]);
+  const openEditor = useCallback((row) => setModal({ type: "edit", profile: row }), []);
+  const visibleColumnsKey = preferences.visible_columns.join(",");
+  const visibleColumns = useMemo(() => (visibleColumnsKey ? visibleColumnsKey.split(",") : []), [visibleColumnsKey]);
 
   const exportAccountData = async (kind) => {
     try {
@@ -209,10 +266,10 @@ export default function App() {
     catch (error) { notify(userError(error), "error"); }
   };
 
-  const launchOne = async (row) => {
+  const launchOne = useCallback(async (row) => {
     try { const result = await call("launch_profile", row.profile_id); if (result?.profile) applyProfileDelta([result.profile]); notify(result?.already_running ? "Hồ sơ đang mở." : "Đã mở hồ sơ."); }
     catch (error) { notify(userError(error), "error"); }
-  };
+  }, [applyProfileDelta, notify]);
 
   useEffect(() => {
     if (!batch?.jobId) return undefined;
@@ -266,7 +323,10 @@ export default function App() {
     } catch (error) { notify(userError(error), "error"); } finally { setDeleteInFlight(false); }
   };
 
-  const chooseTheme = (theme) => updatePreferences({ theme });
+  const chooseTheme = (theme) => {
+    updatePreferences({ theme });
+    themeSwitch.request(theme);
+  };
   const updateSettingPreferences = useCallback((changes) => {
     updatePreferences(changes);
     if (Object.hasOwn(changes, "reduce_motion")) {
@@ -276,14 +336,18 @@ export default function App() {
     }
   }, [updatePreferences]);
 
-  return <div className="app-shell">
-    <Header query={query} onQuery={setQuery} sort={sort} onSort={setSort} onRefresh={loadProfiles} refreshing={refreshing} theme={preferences.theme} onThemeChange={chooseTheme} onSettings={() => setModal({ type: "settings" })} onAbout={() => setModal({ type: "about" })} />
-    <main className="app-main"><div className="dashboard-content"><ProfileTable rows={visibleProfiles} selected={selected} onToggle={toggle} onToggleAll={toggleAll} onEdit={(row) => setModal({ type: "edit", profile: row })} onOpen={launchOne} visibleColumns={preferences.visible_columns} /><div className="workspace-strip"><div><p className="eyebrow">Hồ sơ đang chọn</p><p className="workspace-name">{selectedProfile ? `${selectedProfile.stt} · ${selectedProfile.name}` : "Chọn một hồ sơ để xem thông tin nhanh"}</p></div>{runtime && <p className={runtime.browser_available ? "runtime-inline runtime-ready" : "runtime-inline runtime-warning"}>{runtime.browser_available ? "Runtime sẵn sàng" : "Thiếu browser/chrome.exe"}</p>}</div></div><RightSidebar selectedCount={selected.size} delay={delay} onDelay={setDelay} onLaunch={launch} onCreate={() => setModal({ type: "create" })} onImport={() => setModal({ type: "import" })} onExport={exportAccountData} onEdit={() => selectedProfile && setModal({ type: "edit", profile: selectedProfile })} onDelete={deleteSelected} deleteInFlight={deleteInFlight} onClear={() => setSelected(new Set())} onCheckProxy={() => setModal({ type: "check", profile: selectedProfile })} batch={batch} profileCount={profiles.length} runningCount={profiles.filter((row) => row.status === "Running").length} proxyCount={profiles.filter((row) => row.proxy?.enabled).length} /></main>
-    {modal?.type === "settings" && <SettingsPage preferences={{ ...preferences, reduce_motion: effectiveReduceMotion }} onPreferenceChange={updateSettingPreferences} notify={notify} onClose={() => setModal(null)} />}
-    {modal?.type === "about" && <AboutPage notify={notify} onClose={() => setModal(null)} />}
-    {(modal?.type === "create" || modal?.type === "edit") && <ProfileEditorModal profile={modal.profile} onClose={() => setModal(null)} onSaved={handleProfileSaved} notify={notify} />}
-    {modal?.type === "import" && <BatchImportDialog onClose={() => setModal(null)} onDone={handleImportDone} notify={notify} />}
-    {modal?.type === "check" && <ProxyCheckDialog profile={modal.profile} onClose={() => setModal(null)} notify={notify} />}
-    <Toasts items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
-  </div>;
+  return <>
+    <div className="app-shell" ref={shellRef} inert={covered ? "" : undefined}>
+      <Header query={query} onQuery={setQuery} sort={sort} onSort={setSort} onRefresh={loadProfiles} refreshing={refreshing} theme={visualTheme} onThemeChange={chooseTheme} onSettings={() => setModal({ type: "settings" })} onAbout={() => setModal({ type: "about" })} />
+      <main className="app-main"><div className="dashboard-content"><ProfileTable rows={visibleProfiles} selected={selected} onToggle={toggle} onToggleAll={toggleAll} onEdit={openEditor} onOpen={launchOne} visibleColumns={visibleColumns} /><div className="workspace-strip"><div><p className="eyebrow">Hồ sơ đang chọn</p><p className="workspace-name">{selectedProfile ? `${selectedProfile.stt} · ${selectedProfile.name}` : "Chọn một hồ sơ để xem thông tin nhanh"}</p></div>{runtime && <p className={runtime.browser_available ? "runtime-inline runtime-ready" : "runtime-inline runtime-warning"}>{runtime.browser_available ? "Runtime sẵn sàng" : "Thiếu browser/chrome.exe"}</p>}</div></div><RightSidebar selectedCount={selected.size} delay={delay} onDelay={setDelay} onLaunch={launch} onCreate={() => setModal({ type: "create" })} onImport={() => setModal({ type: "import" })} onExport={exportAccountData} onEdit={() => selectedProfile && setModal({ type: "edit", profile: selectedProfile })} onDelete={deleteSelected} deleteInFlight={deleteInFlight} onClear={() => setSelected(new Set())} onCheckProxy={() => setModal({ type: "check", profile: selectedProfile })} batch={batch} profileCount={profiles.length} runningCount={profiles.filter((row) => row.status === "Running").length} proxyCount={profiles.filter((row) => row.proxy?.enabled).length} /></main>
+    </div>
+    {createPortal(<>
+      {modal?.type === "settings" && <SettingsPage preferences={{ ...preferences, reduce_motion: effectiveReduceMotion }} onPreferenceChange={updateSettingPreferences} notify={notify} onClose={() => setModal(null)} />}
+      {modal?.type === "about" && <AboutPage notify={notify} onClose={() => setModal(null)} initialInfo={boot?.about ?? null} />}
+      {(modal?.type === "create" || modal?.type === "edit") && <ProfileEditorModal profile={modal.profile} onClose={() => setModal(null)} onSaved={handleProfileSaved} notify={notify} />}
+      {modal?.type === "import" && <BatchImportDialog onClose={() => setModal(null)} onDone={handleImportDone} notify={notify} />}
+      {modal?.type === "check" && <ProxyCheckDialog profile={modal.profile} onClose={() => setModal(null)} notify={notify} />}
+      <Toasts items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
+    </>, document.body)}
+  </>;
 }

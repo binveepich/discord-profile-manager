@@ -36,6 +36,7 @@ PROTECTED_WORKTREE_PREFIXES = (
 APPROVED_MILESTONE_WORKTREE_PATHS = {
     "legacy/profile_manager.py",
     "tests/test_m5_extensions.py",
+    "main.py",
 }
 PROTECTED_RUNTIME_ROOTS = (
     "profiles",
@@ -187,7 +188,7 @@ def _protected_runtime_snapshot(project_root=PROJECT_ROOT):
 def _source_tree_safety_check(changed_paths=None):
     try:
         stable_main = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
-        if "from legacy.profile_manager import main" not in stable_main:
+        if "from revamped import product_main" not in stable_main or '"--legacy"' not in stable_main:
             return False
         if not _run(["scripts/check_refactor_integrity.py"]):
             return False
@@ -210,7 +211,7 @@ def _source_tree_safety_check(changed_paths=None):
 
 
 def _extension_security_check():
-    """Require the two product built-ins without a quarantine policy."""
+    """Require Autofill while keeping the extractor available as optional."""
     try:
         from revamped.extensions import (
             PROHIBITED_EXTENSION_NAMES,
@@ -218,11 +219,9 @@ def _extension_security_check():
         )
         prohibited = {name.casefold() for name in PROHIBITED_EXTENSION_NAMES}
         required = {name.casefold() for name in REQUIRED_EXTENSION_NAMES}
-        if "discord-token-extractor-extension" not in required:
+        if required != {"discord-autofill-extension"}:
             return False
-        if prohibited or prohibited & required:
-            return False
-        if "discord-autofill-extension" not in required:
+        if "discord-token-extractor-extension" in prohibited or prohibited & required:
             return False
         return True
     except (ImportError, OSError, AttributeError, TypeError):

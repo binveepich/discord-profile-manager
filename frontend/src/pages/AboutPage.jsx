@@ -7,17 +7,19 @@ import useDialogMotion from "../useDialogMotion";
 const DEVELOPER_NAME = "merino sầu riêng";
 const DEVELOPER_URL = "https://github.com/binveepich";
 
-export default function AboutPage({ notify, onClose }) {
-  const [info, setInfo] = useState(null);
+export default function AboutPage({ notify, onClose, initialInfo = null }) {
+  const [info, setInfo] = useState(initialInfo);
   const { closeDialog, dialogRef, backdropClassName, dialogClassName } = useDialogMotion(onClose);
 
   useEffect(() => {
+    // The loading splash has already read this information, so the dialog does not read it again.
+    if (initialInfo) return undefined;
     let active = true;
     const unsubscribe = onBridgeReady(() => {
       call("get_about_info").then((value) => { if (active) setInfo(value); }).catch((error) => { if (active) notify(userError(error), "error"); });
     });
     return () => { active = false; unsubscribe(); };
-  }, [notify]);
+  }, [notify, initialInfo]);
 
   const closeFromBackdrop = (event) => {
     if (event.target === event.currentTarget) closeDialog();

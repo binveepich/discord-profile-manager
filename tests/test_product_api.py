@@ -8,9 +8,10 @@ from unittest.mock import patch
 
 from compatibility.fixtures import DisposableWorkspace
 from revamped.accounts import derive_profile_name, parse_account_string
-from revamped import environment
+from revamped import environment, proxy
 from revamped.core import InvalidAccountFormatError, ProxyValidationError
 from revamped.main import compose_product_candidate
+from revamped.models import ProfileRecord
 from revamped.product_api import ProductAPI
 from revamped.processes import ChromiumProcessInspector
 
@@ -45,6 +46,8 @@ class ProductAPITests(unittest.TestCase):
         self.assertNotIn(secret, dto_text)
         self.assertNotIn("fixture-totp", dto_text)
         self.assertIn(secret, export_text)
+        self.assertNotIn("proxy_username", export_text)
+        self.assertNotIn("proxy_password", export_text)
         self.assertIn("FIXTURE-TOTP", export_text)
         staged = self.application.extension_service.profile_extension_path("profile_0001") / "config.js"
         self.assertIn(secret, staged.read_text(encoding="utf-8"))
@@ -167,14 +170,43 @@ class ProductAPITests(unittest.TestCase):
             "port": 8080,
         })
 
-    def test_proxy_parse_is_transient_and_supports_authenticated_syntax(self):
-        parsed = self.api.parse_proxy("http://user:fixture-pass@proxy.example:8080")
-        self.assertTrue(parsed["authenticated"])
-        self.assertEqual(parsed["host"], "proxy.example")
-        row = self.api.create_profile("Proxy", proxy_payload=parsed)
-        exported = json.loads(self.api.export_json([row["profile_id"]])["content"])[0]
-        self.assertEqual(exported["proxy_username"], "user")
-        self.assertEqual(exported["proxy_password"], "fixture-pass")
+    def test_proxy_api_rejects_auth_and_round_trips_endpoint_only(self):
+        endpoint = "https://proxy.example:8443"
+        parsed = self.api.parse_proxy(endpoint)
+        self.assertEqual(parsed, {
+            "scheme": "https", "host": "proxy.example", "port": 8443,
+        })
+        self.assertEqual(set(parsed), {"scheme", "host", "port"})
+
+        with self.assertRaises(ProxyValidationError):
+            self.api.parse_proxy(f"http://{'u' * 5}:{'p' * 7}@proxy.example:8080")
+        with self.assertRaises(ProxyValidationError):
+            self.api._proxy_payload({
+                "enabled": True, "scheme": "http", "host": "proxy.example",
+                "port": 8080, "username": "x" * 5, "password": "y" * 7,
+            })
+
+        row = self.api.create_profile("Proxy endpoint", proxy_payload=parsed)
+        profile_id = row["profile_id"]
+        record = self.application.profile_service.get_profile_record(profile_id)
+        expected = {
+            "proxy_enabled": True, "proxy_scheme": "https",
+            "proxy_host": "proxy.example", "proxy_port": 8443,
+        }
+        self.assertTrue(all(record[key] == value for key, value in expected.items()))
+        model_record = ProfileRecord.from_mapping(record).to_mapping()
+        self.assertTrue(all(model_record[key] == value for key, value in expected.items()))
+        self.assertNotIn("proxy_username", model_record)
+        self.assertNotIn("proxy_password", model_record)
+        self.assertEqual(proxy.proxy_launch_arguments(record), [
+            "--proxy-server=https://proxy.example:8443",
+        ])
+        exported = json.loads(self.api.export_json([profile_id])["content"])[0]
+        self.assertEqual(exported["proxy_scheme"], "https")
+        self.assertEqual(exported["proxy_host"], "proxy.example")
+        self.assertEqual(exported["proxy_port"], 8443)
+        self.assertNotIn("proxy_username", exported)
+        self.assertNotIn("proxy_password", exported)
 
     def test_ui_preferences_are_application_owned_and_round_trip(self):
         saved = self.api.save_ui_preferences({

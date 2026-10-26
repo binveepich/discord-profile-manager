@@ -22,10 +22,10 @@ from .storage import ExtensionPolicyStore
 
 AUTOFILL_EXTENSION_NAME = "discord-autofill-extension"
 TOKEN_EXTRACTOR_EXTENSION_NAME = "discord-token-extractor-extension"
-# Both bundled extensions are first-class product extensions.  The master
-# copies remain immutable; only per-profile staged copies are ever modified.
+# Discovered sources outside this list are optional and can be explicitly
+# enabled through the global extension policy. Master copies remain immutable.
 PROHIBITED_EXTENSION_NAMES = ()
-REQUIRED_EXTENSION_NAMES = (AUTOFILL_EXTENSION_NAME, TOKEN_EXTRACTOR_EXTENSION_NAME)
+REQUIRED_EXTENSION_NAMES = (AUTOFILL_EXTENSION_NAME,)
 PROFILE_EXTENSIONS_DIR_NAME = "Unpacked Extensions"
 
 
@@ -59,9 +59,10 @@ class ExtensionService:
     def _policy_enabled_names(self):
         policy = self.policy_store.load()
         prohibited = {name.casefold() for name in PROHIBITED_EXTENSION_NAMES}
+        disabled = {name.casefold() for name in policy.get("disabled_extensions", ())}
         names = [
             name for name in policy.get("enabled_extensions", ())
-            if name.casefold() not in prohibited
+            if name.casefold() not in prohibited and name.casefold() not in disabled
         ]
         seen = {name.casefold() for name in names}
         for required_name in REQUIRED_EXTENSION_NAMES:
@@ -94,9 +95,8 @@ class ExtensionService:
 
         Chromium's profile preference shape uses ``extensions.settings`` for
         installed extension state and the top-level ``toolbar.pinned_actions``
-        list for toolbar pins.  This is a preference-only operation; it never
-        starts the browser.  The bundled manifests carry stable public keys,
-        so both required extensions have deterministic IDs.
+        list for toolbar pins. This is a preference-only operation; it never
+        starts the browser. Bundled manifests carry stable public keys.
         """
         preferences = self.profile_service.get_browser_profile_dir(profile_id) / "Preferences"
         try:
@@ -393,6 +393,26 @@ class ExtensionService:
             name.casefold() for name in self._policy_enabled_names()
         }
 
+    def is_profile_extension_enabled(self, profile_id, extension_name):
+        """Keep a valid pre-upgrade token-extractor deployment active."""
+        if self.is_extension_enabled(extension_name):
+            return True
+        if (
+            not isinstance(extension_name, str)
+            or extension_name.casefold() != TOKEN_EXTRACTOR_EXTENSION_NAME.casefold()
+        ):
+            return False
+        policy = self.policy_store.load()
+        disabled = {
+            name.casefold() for name in policy.get("disabled_extensions", ())
+        }
+        if extension_name.casefold() in disabled:
+            return False
+        return any(
+            path.name.casefold() == extension_name.casefold()
+            for path in self.get_profile_extension_paths(profile_id)
+        )
+
     def set_extension_enabled(self, extension_name, enabled):
         """Set one optional extension in the application-owned global policy."""
         if not isinstance(extension_name, str) or not extension_name.strip():
@@ -420,23 +440,33 @@ class ExtensionService:
         with self._policy_operation():
             policy = self.policy_store.load()
             names = list(policy.get("enabled_extensions", ()))
+            disabled_names = list(policy.get("disabled_extensions", ()))
             if enabled:
                 if extension_name.casefold() not in {name.casefold() for name in names}:
                     names.append(extension_name)
+                disabled_names = [
+                    name for name in disabled_names
+                    if name.casefold() != extension_name.casefold()
+                ]
             else:
                 names = [
                     name for name in names
                     if name.casefold() != extension_name.casefold()
                 ]
+                if extension_name.casefold() not in {
+                    name.casefold() for name in disabled_names
+                }:
+                    disabled_names.append(extension_name)
             normalized = []
             seen = set()
-            for name in [*REQUIRED_EXTENSION_NAMES, *names]:
+            for name in names:
                 if name.casefold() not in seen:
                     normalized.append(name)
                     seen.add(name.casefold())
             self.policy_store.save({
                 "version": ExtensionPolicyStore.version,
                 "enabled_extensions": normalized,
+                "disabled_extensions": disabled_names,
             })
         return self.get_registry_state()
 
@@ -617,7 +647,7 @@ class ExtensionService:
         return prepared
 
     def ensure_required_extensions(self, profile_id, source_cache=None):
-        """Deploy both product defaults or fail clearly before launching a profile.
+        """Deploy required built-ins or fail clearly before profile launch.
 
         Account setup is not a prerequisite. The GUI/launcher calls this at the
         launch boundary, so fresh profiles receive the same built-in registry
@@ -645,7 +675,11 @@ class ExtensionService:
                     f"Required extension source not found at {self.get_source_path(extension_name)}"
                 )
 
+        policy = self.policy_store.load()
         enabled = {name.casefold() for name in self._policy_enabled_names()}
+        disabled = {
+            name.casefold() for name in policy.get("disabled_extensions", ())
+        }
         prohibited = {name.casefold() for name in PROHIBITED_EXTENSION_NAMES}
         names = list(REQUIRED_EXTENSION_NAMES)
         names.extend(
@@ -655,19 +689,28 @@ class ExtensionService:
             and extension_name.casefold() not in prohibited
             and extension_name.casefold() in enabled
         )
-        paths = [
+        deployed_paths = [
             self.ensure_profile_extension(profile_id, extension_name)
             for extension_name in names
         ]
-        self._register_profile_extensions(profile_id, paths)
+        paths = list(deployed_paths)
+        token_name = TOKEN_EXTRACTOR_EXTENSION_NAME.casefold()
+        if token_name not in enabled and token_name not in disabled:
+            paths.extend(
+                path for path in self.get_profile_extension_paths(profile_id)
+                if path.name.casefold() == token_name
+            )
+        # Existing pre-upgrade copies are passed through without refreshing or
+        # re-registering them. Only current required/explicitly enabled sources
+        # are changed by this operation.
+        self._register_profile_extensions(profile_id, deployed_paths)
         return paths
 
     def get_enabled_profile_extension_paths(self, profile_id):
-        """Return only current-policy deployments, excluding stale disabled ones."""
-        enabled = {name.casefold() for name in self._policy_enabled_names()}
+        """Return policy-enabled paths and retained pre-upgrade extractor copies."""
         return [
             path for path in self.get_profile_extension_paths(profile_id)
-            if path.name.casefold() in enabled
+            if self.is_profile_extension_enabled(profile_id, path.name)
         ]
 
     # Explicit launch-oriented naming for callers that do not need deployment.

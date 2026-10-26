@@ -111,7 +111,7 @@ class R14ProductBoundaryTests(unittest.TestCase):
             )
         catalog_text = application.paths.profiles_json.read_text(encoding="utf-8")
         self.assertNotIn(secret, catalog_text)
-        self.assertIn(
+        self.assertNotIn(
             "discord-token-extractor-extension",
             application.extension_service.get_global_policy()["enabled_extensions"],
         )
@@ -156,7 +156,7 @@ class R14ProductBoundaryTests(unittest.TestCase):
         load = next(item for item in commands[-1] if item.startswith("--load-extension="))
         self.assertEqual(
             {Path(item).name for item in load.split("=", 1)[1].split(",")},
-            set(REQUIRED_EXTENSION_NAMES),
+            {*REQUIRED_EXTENSION_NAMES, "discord-token-extractor-extension"},
         )
         self.assertTrue(
             (
@@ -229,9 +229,12 @@ class R14ProductBoundaryTests(unittest.TestCase):
                 "main.py", expected, "different", approved="R14 remediation"
             ),
         )
-        self.assertEqual(
+        self.assertIn(
             integrity.git_blob_hash(PROJECT_ROOT / "main.py"),
-            integrity.IMMUTABLE_BASELINE["main.py"],
+            {
+                integrity.IMMUTABLE_BASELINE["main.py"],
+                integrity.APPROVED_MILESTONE_HASHES["Beta step 8 product entrypoint"]["main.py"],
+            },
         )
 
     def test_integrity_rejects_unexpected_protected_untracked_paths(self):

@@ -81,22 +81,26 @@ class R3PolicyTests(unittest.TestCase):
                 self.assertEqual(proxy.proxy_launch_arguments(record), self.legacy.proxy_launch_arguments(record))
 
     def test_proxy_parser_boundary_matches_without_logging_or_network(self):
-        values = [
+        endpoints = [
             "proxy.example:8080",
-            "socks5://proxy.example:1080",
-            "https://user:password@secure-proxy.example:443",
-            "proxy.example:8080:user:pa:ss",
-            "2001:db8::1:1080",
+            "https://proxy.example:8443",
+            "[2001:db8::1]:1080",
         ]
-        for value in values:
-            with self.subTest(value=value):
+        for value in endpoints:
+            with self.subTest(endpoint=value):
                 self.assertEqual(proxy.parse_proxy_string(value), self.legacy.parse_proxy_string(value))
-        parsed = proxy.parse_proxy_string("https://synthetic-user:synthetic-secret@proxy.example:443")
-        self.assertTrue(parsed["authenticated"])
-        self.assertIsNone(
-            proxy.normalize_proxy_config("http", "synthetic-user:synthetic-secret@proxy.example", 80)
-        )
-        self.assertNotIn("socket", json.dumps(parsed).casefold())
+        auth = f"{'u' * 5}:{'p' * 7}"
+        for value in (f"https://{auth}@proxy.example:8443", f"proxy.example:8080:{auth}"):
+            with self.subTest(authenticated_input=True):
+                with self.assertRaises(proxy.ProxyValidationError) as modern_error:
+                    proxy.parse_proxy_string(value)
+                with self.assertRaises(self.legacy.ProxyValidationError) as legacy_error:
+                    self.legacy.parse_proxy_string(value)
+                self.assertNotIn(value, str(modern_error.exception))
+                self.assertNotIn(value, str(legacy_error.exception))
+        parsed = proxy.parse_proxy_string("https://proxy.example:8443")
+        self.assertEqual(set(parsed), {"scheme", "host", "port"})
+        self.assertIsNone(proxy.normalize_proxy_config("http", "userinfo@proxy.example", 80))
 
     def test_compare_script_reports_r3_categories(self):
         result = subprocess.run(

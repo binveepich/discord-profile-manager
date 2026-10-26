@@ -66,10 +66,6 @@ class ProfileRecord:
     proxy_scheme: str | None = None
     proxy_host: str | None = None
     proxy_port: int | None = None
-    # Explicitly stored only for the user's requested account export.  These
-    # fields are never included in normal profile DTOs or logs.
-    proxy_username: str | None = None
-    proxy_password: str | None = None
     extras: MappingProxyType = field(default_factory=lambda: MappingProxyType({}))
 
     @classmethod
@@ -78,9 +74,12 @@ class ProfileRecord:
             "profile_id", "display_name", "profile_directory", "created_at",
             "last_opened_at", "environment_preset", "environment_config",
             "proxy_enabled", "proxy_scheme", "proxy_host", "proxy_port",
-            "proxy_username", "proxy_password",
         }
-        extras = MappingProxyType({key: item for key, item in value.items() if key not in known})
+        ignored_legacy_proxy_fields = {"proxy_username", "proxy_password"}
+        extras = MappingProxyType({
+            key: item for key, item in value.items()
+            if key not in known and key not in ignored_legacy_proxy_fields
+        })
         raw_config = value.get("environment_config")
         return cls(
             profile_id=value["profile_id"],
@@ -94,8 +93,6 @@ class ProfileRecord:
             proxy_scheme=value.get("proxy_scheme"),
             proxy_host=value.get("proxy_host"),
             proxy_port=value.get("proxy_port"),
-            proxy_username=value.get("proxy_username"),
-            proxy_password=value.get("proxy_password"),
             extras=extras,
         )
 
@@ -122,10 +119,6 @@ class ProfileRecord:
                 "proxy_host": self.proxy_host,
                 "proxy_port": self.proxy_port,
             })
-            if self.proxy_username is not None:
-                result["proxy_username"] = self.proxy_username
-            if self.proxy_password is not None:
-                result["proxy_password"] = self.proxy_password
         return result
 
 

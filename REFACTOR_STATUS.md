@@ -9,12 +9,13 @@ rollback, and integrity governance are implemented and automated; manual
 Windows/Tk/Chromium acceptance is still pending.
 
 AUTOMATED PARITY: PASS
-LEGACY DEFAULT: UNCHANGED
+DEFAULT ENTRYPOINT: REACT PRODUCT (`python main.py`); legacy via `python main.py --legacy`
 REVAMPED: READY FOR R14 MANUAL ACCEPTANCE
-DEFAULT SWITCH: BLOCKED PENDING USER APPROVAL
+DEFAULT SWITCH: APPROVED BY OWNER (beta prep step 8)
 PACKAGING: LOCKED
 
-The stable entrypoint remains legacy and packaging remains locked.
+The stable entrypoint is `main.py`, which starts the React product;
+`python main.py --legacy` starts the legacy app. Packaging remains locked.
 
 ## Milestones
 
@@ -41,15 +42,16 @@ The stable entrypoint remains legacy and packaging remains locked.
 - Baseline branch: `main`
 - Working branch: `refactor/revamped-parallel`
 - `python -B scripts/verify.py`: PASS
-- `python -B -m unittest discover -s tests -v`: PASS, 307 tests, 1 skipped
-- `python -B -m unittest discover -s tests -p "test_m*.py"`: PASS, 173 tests
-- `python -B -m unittest discover -s tests -p "test_r*.py"`: PASS, 131 tests, 1 skipped
-- `python -B -m unittest discover -s tests -p "test_*parity.py"`: PASS
+- `python -B -m unittest discover -s tests -p "test_*.py"`: PASS, 422 tests, 1 skipped (measured 2026-10-26)
+- `python -B -m unittest discover -s tests -p "test_m*.py"`: PASS, 182 tests
+- `python -B -m unittest discover -s tests -p "test_r*.py"`: PASS, 135 tests, 1 skipped
+- `python -B -m unittest discover -s tests -p "test_*parity.py"`: PASS, 4 tests
+- `npm test` in `frontend/` (node --test): PASS, 64 tests; `npx vite build` in `frontend/`: PASS
 - `python -B scripts/verify_revamped.py`: PASS, including protected runtime/source and prohibited-extension safety
 - `python -B scripts/check_refactor_integrity.py`: PASS, immutable R0 plus named approved milestones
 - `python -B scripts/compare_legacy_revamped.py`: PASS
-- Protected source data intentionally touched: legacy compatibility source and its milestone test changed only through explicit R14 security remediation; root `main.py` unchanged
-- Stable `main.py`: LEGACY, unchanged
+- Protected source data intentionally touched: legacy compatibility source and its milestone test changed only through explicit R14 security remediation, and through the owner-approved beta step 2.5 legacy repair (named milestone `Beta step 2.5 legacy proxy endpoint repair` in `scripts/check_refactor_integrity.py`: `legacy/profile_manager.py`, `tests/test_m5_extensions.py`, `tests/test_m8_proxy.py`); root `main.py` changed only by the owner-approved beta step 8 routing (named milestone `Beta step 8 product entrypoint` in `scripts/check_refactor_integrity.py`)
+- Stable `main.py`: starts the React product (beta step 8, owner-approved); `--legacy` starts the legacy app
 - Packaging: LOCKED
 - R9B GUI launch: available with the explicit disposable `--workspace-root` command; default browser launch is disabled
 - R14 development launch: `--workspace-root` below repository `tmp/`; Product launch requires explicit `--product-root` and uses a product-owned marker

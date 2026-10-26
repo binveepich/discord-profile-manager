@@ -121,7 +121,8 @@ class R9BGuiTests(unittest.TestCase):
             compose(Path.cwd())
 
         stable_main = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
-        self.assertIn("from legacy.profile_manager import main", stable_main)
+        self.assertIn("from revamped import product_main", stable_main)
+        self.assertIn('"--legacy"', stable_main)
         result = subprocess.run(
             [sys.executable, "-B", "scripts/check_refactor_integrity.py"],
             cwd=PROJECT_ROOT,

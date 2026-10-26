@@ -38,6 +38,45 @@ from .processes import ChromiumProcessInspector
 
 PROFILE_EXTENSION_DIR_NAME = "Unpacked Extensions"
 MAX_DISPLAYED_PROFILES = 9_999
+_TYPED_NUMBER_NAME = re.compile(r"\s*([0-9]+)\s*\|")
+_DEFAULT_PROFILE_NAME = re.compile(r"\s*Profile\s+(\d+)\s*")
+_PROFILE_ID_NUMBER = re.compile(r"(\d+)$")
+
+
+def profile_display_sort_key(display_name, profile_id):
+    """Return the (group, number) sort key of a profile in table order; lower sorts first.
+
+    Group 0: a typed STT-style prefix such as "0001 | name", ordered by that number.
+    Group 1: plain account names, in catalog order.
+    Group 2: a name containing FLAG in any case, ordered by the profile's own number.
+    Group 3: the default "Profile N" name, ordered by N.
+    """
+    name = str(display_name or "")
+    typed = _TYPED_NUMBER_NAME.match(name)
+    if typed:
+        return 0, int(typed.group(1))
+    if "flag" in name.casefold():
+        number = _PROFILE_ID_NUMBER.search(str(profile_id))
+        return 2, int(number.group(1)) if number else 0
+    default = _DEFAULT_PROFILE_NAME.fullmatch(name)
+    if default:
+        return 3, int(default.group(1))
+    return 1, 0
+
+
+def table_order(records):
+    """Return (STT, record) pairs in table order, the only place STT is assigned.
+
+    The list is sorted first and then numbered: STT is the 1-based position in the sorted list. A number typed
+    into a name only feeds the sort key, so it is never used as STT. Equal keys keep catalog order.
+    """
+    ordered = sorted(
+        records,
+        key=lambda record: profile_display_sort_key(
+            record.get("display_name") or record["profile_id"], record["profile_id"]
+        ),
+    )
+    return list(enumerate(ordered, 1))
 
 
 class _NullLogger:
@@ -342,6 +381,14 @@ class ProfileService:
     def get_profile_metadata(self):
         return [dict(record) for record in self._load_catalog()["profiles"]]
 
+    def display_position(self, profile_id):
+        """Return the 1-based STT of a profile in table order, or None. The arrange rule reads this."""
+        profile_id = str(profile_id)
+        for position, record in table_order(self.get_profile_metadata()):
+            if record.get("profile_id") == profile_id:
+                return position
+        return None
+
     def get_profile_record(self, profile_id):
         profile_id = validate_profile_id(profile_id)
         record = self._record_map(self._load_catalog()).get(profile_id)
@@ -419,7 +466,7 @@ class ProfileService:
 
     @staticmethod
     def _normalized_proxy_settings(
-        enabled, scheme=None, host=None, port=None, username=None, password=None
+        enabled, scheme=None, host=None, port=None
     ):
         """Validate one unauthenticated proxy independently of persistence."""
         if enabled is not True and enabled is not False:
@@ -439,18 +486,14 @@ class ProfileService:
             raise proxy.ProxyValidationError("Proxy port must be a number from 1 to 65535.")
         if normalized is None:
             raise proxy.ProxyValidationError("Proxy configuration is incomplete or invalid.")
-        credentials = proxy.normalize_proxy_credentials(username, password)
-        return {"enabled": True, **normalized, **credentials}
+        return {"enabled": True, **normalized}
 
     @staticmethod
     def _apply_proxy_settings(record, normalized):
         """Write an already-validated proxy state into one catalog record."""
         if not normalized["enabled"]:
             record["proxy_enabled"] = False
-            for field in (
-                "proxy_scheme", "proxy_host", "proxy_port",
-                "proxy_username", "proxy_password",
-            ):
+            for field in ("proxy_scheme", "proxy_host", "proxy_port"):
                 record.pop(field, None)
             return
         record["proxy_enabled"] = True
@@ -459,12 +502,6 @@ class ProfileService:
             "proxy_host": normalized["host"],
             "proxy_port": normalized["port"],
         })
-        if normalized.get("username") is not None:
-            record["proxy_username"] = normalized["username"]
-            record["proxy_password"] = normalized["password"]
-        else:
-            record.pop("proxy_username", None)
-            record.pop("proxy_password", None)
 
     @staticmethod
     def _apply_environment_settings(
@@ -504,14 +541,9 @@ class ProfileService:
     def get_proxy(self, profile_id):
         return dict(proxy.effective_proxy(self.get_profile_record(profile_id)))
 
-    def set_proxy(
-        self, profile_id, enabled, scheme=None, host=None, port=None,
-        username=None, password=None
-    ):
+    def set_proxy(self, profile_id, enabled, scheme=None, host=None, port=None):
         profile_id = validate_profile_id(profile_id)
-        normalized = self._normalized_proxy_settings(
-            enabled, scheme, host, port, username, password
-        )
+        normalized = self._normalized_proxy_settings(enabled, scheme, host, port)
         with self.operation():
             self._check_registry_idle()
             self.require_profile_dir(profile_id)
@@ -556,7 +588,9 @@ class ProfileService:
             # product records never expose this obsolete editable field.
             environment_state["device_scale_factor"] = source.get("device_scale_factor")
         if source.get("environment_schema") == environment.PRODUCT_ENVIRONMENT_SCHEMA:
-            details = environment.product_environment_details(record)
+            details = environment.product_environment_details(
+                record, position=self.display_position(profile_id)
+            )
             environment_state.update({
                 "generated_family": details.get("generated_family"),
                 "generated_revision": details.get("generated_revision"),
@@ -629,13 +663,14 @@ class ProfileService:
             if proxy_config is None:
                 normalized_proxy = dict(proxy.effective_proxy(record))
             else:
+                # Credential fields are refused, not dropped: callers must not believe authentication was saved.
+                if set(proxy_config) - {"enabled", "scheme", "host", "port"}:
+                    raise proxy.ProxyValidationError("Proxy settings contain an unsupported field.")
                 normalized_proxy = self._normalized_proxy_settings(
                     proxy_config.get("enabled"),
                     proxy_config.get("scheme"),
                     proxy_config.get("host"),
                     proxy_config.get("port"),
-                    proxy_config.get("username", record.get("proxy_username")),
-                    proxy_config.get("password", record.get("proxy_password")),
                 )
 
             record["environment_preset"] = normalized_preset

@@ -3,11 +3,17 @@
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import unittest
 
 from compatibility.fixtures import DisposableWorkspace, PROJECT_ROOT
 from revamped.core import ExtensionError, ExtensionNotFoundError, ProjectPaths
-from revamped.extensions import ExtensionService, REQUIRED_EXTENSION_NAMES
+from revamped.extensions import (
+    AUTOFILL_EXTENSION_NAME,
+    ExtensionService,
+    REQUIRED_EXTENSION_NAMES,
+    TOKEN_EXTRACTOR_EXTENSION_NAME,
+)
 from revamped.launcher import ChromiumLauncher
 from revamped.processes import ChromiumProcessInspector
 from revamped.profiles import ProfileService
@@ -125,6 +131,145 @@ class R10ExtensionIntegrationTests(unittest.TestCase):
         self.assertEqual(
             json.loads((refreshed[0] / "manifest.json").read_text(encoding="utf-8"))["manifest_version"],
             3,
+        )
+
+    def test_token_extractor_is_available_optional_and_not_deployed_to_fresh_profile(self):
+        paths, profiles, profile_id, extensions, launcher = self.make_bundle(
+            repository_assets=True
+        )
+        source_hashes = self.tree_hashes(paths.extensions_dir)
+        self.assertEqual(REQUIRED_EXTENSION_NAMES, (AUTOFILL_EXTENSION_NAME,))
+        state = extensions.get_registry_state()
+        optional = next(
+            item for item in state["optional"]
+            if item["name"] == TOKEN_EXTRACTOR_EXTENSION_NAME
+        )
+        self.assertTrue(optional["available"])
+        self.assertFalse(optional["required"])
+        self.assertFalse(optional["enabled"])
+
+        deployed = extensions.ensure_enabled_extensions(profile_id)
+        names = {path.name for path in deployed}
+        profile_extensions = (
+            profiles.require_profile_dir(profile_id) / "Unpacked Extensions"
+        )
+        command = launcher.build_command(
+            profile_id, profiles.require_profile_dir(profile_id),
+            profiles.get_profile_record(profile_id), deployed,
+        )
+
+        self.assertEqual(names, {AUTOFILL_EXTENSION_NAME})
+        self.assertFalse((profile_extensions / TOKEN_EXTRACTOR_EXTENSION_NAME).exists())
+        load = next(arg for arg in command if arg.startswith("--load-extension="))
+        self.assertEqual(
+            {Path(item).name for item in load.split("=", 1)[1].split(",")},
+            {AUTOFILL_EXTENSION_NAME},
+        )
+        self.assertEqual(self.tree_hashes(paths.extensions_dir), source_hashes)
+
+    def test_preexisting_token_extractor_is_loaded_without_refresh_or_cleanup(self):
+        paths, profiles, profile_id, extensions, launcher = self.make_bundle(
+            repository_assets=True
+        )
+        source_hashes = self.tree_hashes(paths.extensions_dir)
+        profile_extensions = (
+            profiles.require_profile_dir(profile_id) / "Unpacked Extensions"
+        )
+        retained = profile_extensions / TOKEN_EXTRACTOR_EXTENSION_NAME
+        retained.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(paths.extensions_dir / TOKEN_EXTRACTOR_EXTENSION_NAME, retained)
+        autofill = profile_extensions / AUTOFILL_EXTENSION_NAME
+        shutil.copytree(paths.extensions_dir / AUTOFILL_EXTENSION_NAME, autofill)
+        retained_hashes = self.tree_hashes(retained)
+        preferences = profiles.get_browser_profile_dir(profile_id) / "Preferences"
+        preferences.parent.mkdir(parents=True, exist_ok=True)
+        token_manifest = json.loads(
+            (retained / "manifest.json").read_text(encoding="utf-8")
+        )
+        autofill_manifest = json.loads(
+            (autofill / "manifest.json").read_text(encoding="utf-8")
+        )
+        token_id = extensions._extension_id(token_manifest)
+        autofill_id = extensions._extension_id(autofill_manifest)
+        token_registration = {
+            "location": 4,
+            "manifest": token_manifest,
+            "path": str(retained),
+            "state": 1,
+        }
+        autofill_registration = {
+            "location": 4,
+            "manifest": autofill_manifest,
+            "path": str(autofill),
+            "state": 1,
+        }
+        preferences.write_text(json.dumps({
+            "extensions": {"settings": {
+                token_id: token_registration,
+                autofill_id: autofill_registration,
+            }},
+            "toolbar": {"pinned_actions": [token_id, autofill_id]},
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
+        preferences_before = preferences.read_bytes()
+
+        deployed = extensions.ensure_enabled_extensions(profile_id)
+        command = launcher.build_command(
+            profile_id, profiles.require_profile_dir(profile_id),
+            profiles.get_profile_record(profile_id), deployed,
+        )
+        load = next(arg for arg in command if arg.startswith("--load-extension="))
+
+        self.assertIn(retained, deployed)
+        self.assertIn(TOKEN_EXTRACTOR_EXTENSION_NAME, load)
+        self.assertEqual(self.tree_hashes(retained), retained_hashes)
+        preferences_after = json.loads(preferences.read_text(encoding="utf-8"))
+        self.assertEqual(
+            preferences_after["extensions"]["settings"][token_id],
+            token_registration,
+        )
+        self.assertIn(token_id, preferences_after["toolbar"]["pinned_actions"])
+        self.assertEqual(preferences.read_bytes(), preferences_before)
+        self.assertEqual(self.tree_hashes(paths.extensions_dir), source_hashes)
+
+    def test_legacy_required_policy_migrates_extractor_to_default_off(self):
+        paths, profiles, profile_id, extensions, _ = self.make_bundle(
+            repository_assets=True
+        )
+        policy_file = paths.extension_policy_json
+        policy_file.parent.mkdir(parents=True, exist_ok=True)
+        legacy_policy = json.dumps({
+            "version": 1,
+            "enabled_extensions": [
+                AUTOFILL_EXTENSION_NAME,
+                TOKEN_EXTRACTOR_EXTENSION_NAME,
+            ],
+        }).encode("utf-8")
+        policy_file.write_bytes(legacy_policy)
+
+        state = extensions.get_registry_state()
+        optional = next(
+            item for item in state["optional"]
+            if item["name"] == TOKEN_EXTRACTOR_EXTENSION_NAME
+        )
+        deployed = extensions.ensure_enabled_extensions(profile_id)
+
+        self.assertFalse(optional["enabled"])
+        self.assertEqual({path.name for path in deployed}, {AUTOFILL_EXTENSION_NAME})
+        self.assertFalse(
+            (profiles.require_profile_dir(profile_id) / "Unpacked Extensions"
+             / TOKEN_EXTRACTOR_EXTENSION_NAME).exists()
+        )
+        self.assertEqual(policy_file.read_bytes(), legacy_policy)
+
+        extensions.enable_extension(TOKEN_EXTRACTOR_EXTENSION_NAME)
+        policy = json.loads(policy_file.read_text(encoding="utf-8"))
+        self.assertEqual(policy["version"], 2)
+        self.assertIn(TOKEN_EXTRACTOR_EXTENSION_NAME, policy["enabled_extensions"])
+        self.assertNotIn(TOKEN_EXTRACTOR_EXTENSION_NAME, policy["disabled_extensions"])
+        deliberately_deployed = extensions.ensure_enabled_extensions(profile_id)
+        self.assertIn(
+            TOKEN_EXTRACTOR_EXTENSION_NAME,
+            {path.name for path in deliberately_deployed},
         )
 
 

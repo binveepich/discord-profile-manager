@@ -559,14 +559,10 @@ class ProfileGUIController:
     def parse_proxy_input(self, value):
         return proxy.parse_proxy_string(value)
 
-    def save_proxy(self, enabled, scheme=None, host=None, port=None, username=None, password=None):
+    def save_proxy(self, enabled, scheme=None, host=None, port=None):
         selected = self.get_selected_profile()
         if not selected:
             return None
-        if username or password:
-            raise proxy.ProxyValidationError(
-                "Proxy authentication was parsed, but authenticated proxy launch and storage are not supported."
-            )
         profile_id, _ = selected
         result = self.profile_service.set_proxy(profile_id, enabled, scheme, host, port)
         self.refresh()
@@ -1498,7 +1494,6 @@ class TkRevampedApp:
         }
         current_preset = environment.normalize_environment_preset(identity["preset"])
         preset_identity_values = {current_preset: dict(custom_identity_values)}
-        authenticated_input = False
 
         def selected_policy():
             return next(
@@ -1556,21 +1551,14 @@ class TkRevampedApp:
             )
 
         def parse_proxy():
-            nonlocal authenticated_input
             try:
                 parsed = self.controller.parse_proxy_input(pasted_var.get())
-                authenticated_input = parsed.get("authenticated") is True
                 mode_var.set("Enabled")
                 scheme_var.set(parsed["scheme"].upper())
                 host_var.set(parsed["host"])
                 port_var.set(str(parsed["port"]))
                 pasted_var.set("")
-                if authenticated_input:
-                    network_note.set(
-                        "Credentials were detected. Authentication is unsupported; Save will reject this input."
-                    )
-                else:
-                    network_note.set("Proxy authentication is not supported or stored.")
+                network_note.set("Proxy credentials are unsupported; use an unauthenticated endpoint.")
             except Exception as error:
                 self.dialogs.error("Invalid proxy", str(error))
 
@@ -1599,10 +1587,6 @@ class TkRevampedApp:
 
         def save():
             try:
-                if mode_var.get().casefold() == "enabled" and authenticated_input:
-                    raise proxy.ProxyValidationError(
-                        "Authenticated proxy launch and storage are not supported. Use an unauthenticated endpoint or Proxy Off."
-                    )
                 environment_config = {
                     **{key: variable.get() for key, variable in identity_vars.items()},
                     "touch_mode": touch_var.get(),
@@ -1766,31 +1750,21 @@ class TkRevampedApp:
         note = tk.StringVar(value="Proxy authentication is not supported or stored. Close and reopen Chromium after saving changes.")
         tk.Label(form, textvariable=note, wraplength=340, justify=tk.LEFT).grid(row=5, column=0, columnspan=2, sticky="w", pady=8)
         form.columnconfigure(1, weight=1)
-        authenticated_input = False
 
         def parse():
-            nonlocal authenticated_input
             try:
                 parsed = self.controller.parse_proxy_input(pasted_var.get())
-                authenticated_input = parsed.get("authenticated") is True
                 mode_var.set("Enabled")
                 scheme_var.set(parsed["scheme"].upper())
                 host_var.set(parsed["host"])
                 port_var.set(str(parsed["port"]))
                 pasted_var.set("")
-                if authenticated_input:
-                    note.set("Credentials were detected. Authentication is unsupported; Save will reject this input. Parse an unauthenticated endpoint to continue.")
-                else:
-                    note.set("Proxy authentication is not supported or stored. Close and reopen Chromium after saving changes.")
+                note.set("Proxy credentials are unsupported; use an unauthenticated endpoint. Close and reopen Chromium after saving.")
             except Exception as error:
                 self.dialogs.error("Invalid proxy", str(error))
 
         def save():
             try:
-                if mode_var.get().casefold() == "enabled" and authenticated_input:
-                    raise proxy.ProxyValidationError(
-                        "Authenticated proxy launch and storage are not supported. Use an unauthenticated endpoint or Proxy Off."
-                    )
                 self.controller.save_proxy(
                     mode_var.get().casefold() == "enabled",
                     scheme_var.get(), host_var.get(), port_var.get(),

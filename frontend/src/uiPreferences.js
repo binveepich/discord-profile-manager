@@ -61,6 +61,15 @@ export function normalizePreferences(value) {
   return normalize(value);
 }
 
+// Saved backend preferences over the local copy. A local explicit reduce-motion choice keeps priority over the saved one.
+export function mergeSavedPreferences(current, saved, localChoice) {
+  return normalize({
+    ...current,
+    ...saved,
+    reduce_motion: localChoice === null && saved.reduce_motion !== true ? current.reduce_motion : saved.reduce_motion,
+  });
+}
+
 export function resolveReduceMotionPreference(explicitChoice, osPreference) {
   return typeof explicitChoice === "boolean" ? explicitChoice : Boolean(osPreference);
 }

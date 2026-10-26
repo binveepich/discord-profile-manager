@@ -44,9 +44,9 @@ LOG_DIR = BASE_DIR / "log"
 EXTENSIONS_DIR = PROJECT_ROOT / "extensions"
 AUTOFILL_EXTENSION_NAME = "discord-autofill-extension"
 TOKEN_EXTRACTOR_EXTENSION_NAME = "discord-token-extractor-extension"
-# Retain the name for quarantine checks and legacy inspection, but do not make
-# the token-extractor source a required or automatically deployed extension.
-PROHIBITED_EXTENSION_NAMES = (TOKEN_EXTRACTOR_EXTENSION_NAME,)
+# The extractor remains discoverable for deliberate deployment; only Autofill
+# is part of the required deployment set.
+PROHIBITED_EXTENSION_NAMES = ()
 REQUIRED_EXTENSION_NAMES = (AUTOFILL_EXTENSION_NAME,)
 EXT_DIR = EXTENSIONS_DIR / AUTOFILL_EXTENSION_NAME
 PROFILE_EXTENSIONS_DIR_NAME = "Unpacked Extensions"
@@ -598,17 +598,10 @@ def _parse_proxy_host_port(value, allow_raw_ipv6=True):
 
 
 def parse_proxy_string(value):
-    """Parse common provider output without storing or logging credentials.
-
-    Supported forms are host:port, host:port:user:pass, scheme://host:port,
-    and scheme://user:pass@host:port. Credentials are returned for the UI to
-    report that M8 cannot apply them; they are never accepted by set_proxy().
-    """
+    """Parse an unauthenticated endpoint without retaining auth input."""
     if not isinstance(value, str) or not value.strip():
         raise ProxyValidationError("Proxy string is empty.")
     text = value.strip()
-    username = None
-    password = None
     scheme = "http"
 
     if "://" in text:
@@ -621,76 +614,21 @@ def parse_proxy_string(value):
         if not authority or any(char in authority for char in "/?#"):
             raise ProxyValidationError("Proxy string contains an invalid authority.")
         if "@" in authority:
-            userinfo, endpoint = authority.split("@", 1)
-            if "@" in endpoint or ":" not in userinfo:
-                raise ProxyValidationError("Authenticated proxy syntax is malformed.")
-            username, password = userinfo.split(":", 1)
-            if not username or not password:
-                raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
-            if endpoint.count(":") > 1 and not endpoint.startswith("["):
-                raise ProxyValidationError("Authenticated IPv6 proxies must use [host]:port syntax.")
-        host, port = _parse_proxy_host_port(
-            endpoint if "@" in authority else authority,
-            allow_raw_ipv6=username is None,
-        )
+            raise ProxyValidationError("Proxy endpoints must not include authentication data.")
+        host, port = _parse_proxy_host_port(authority)
     else:
-        scheme = "http"
-        if text.startswith("["):
-            closing = text.find("]")
-            if closing < 0 or not text[closing + 1:].startswith(":"):
-                raise ProxyValidationError("IPv6 proxy hosts must use [host]:port syntax.")
-            host_value = text[:closing + 1]
-            suffix = text[closing + 2:]
-            fields = suffix.split(":", 2)
-            if len(fields) == 1:
-                port_value = fields[0]
-            elif len(fields) == 3:
-                port_value, username, password = fields
-                if not username or not password:
-                    raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
-            else:
-                raise ProxyValidationError("Authenticated proxy syntax is malformed.")
-            host, port = _parse_proxy_host_port(
-                f"{host_value}:{port_value}", allow_raw_ipv6=False
-            )
-        elif text.count(":") > 1:
-            # An unbracketed IPv6 endpoint is accepted only when the final
-            # colon clearly separates a valid port. Credentials remain
-            # rejected here because their separators are ambiguous.
+        if "@" in text:
+            raise ProxyValidationError("Proxy endpoints must not include authentication data.")
+        if text.count(":") > 1 and not text.startswith("["):
             try:
                 host, port = _parse_proxy_host_port(text, allow_raw_ipv6=True)
-            except ProxyValidationError:
-                fields = text.split(":", 3)
-                if len(fields) != 4:
-                    raise
-                host, port = _parse_proxy_host_port(
-                    f"{fields[0]}:{fields[1]}", allow_raw_ipv6=False
-                )
-                username, password = fields[2], fields[3]
-                if not username or not password:
-                    raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
+            except ProxyValidationError as error:
+                raise ProxyValidationError(
+                    "Proxy input must be an unauthenticated host:port endpoint."
+                ) from error
         else:
-            fields = text.split(":", 3)
-            if len(fields) == 2:
-                host, port = _parse_proxy_host_port(text, allow_raw_ipv6=False)
-            elif len(fields) == 4:
-                host, port = _parse_proxy_host_port(
-                    f"{fields[0]}:{fields[1]}", allow_raw_ipv6=False
-                )
-                username, password = fields[2], fields[3]
-                if not username or not password:
-                    raise ProxyValidationError("Authenticated proxy syntax requires username and password.")
-            else:
-                raise ProxyValidationError("Proxy string must use host:port syntax.")
-
-    return {
-        "scheme": scheme,
-        "host": host,
-        "port": port,
-        "username": username,
-        "password": password,
-        "authenticated": username is not None or password is not None,
-    }
+            host, port = _parse_proxy_host_port(text, allow_raw_ipv6=False)
+    return {"scheme": scheme, "host": host, "port": port}
 
 
 def normalize_viewport_dimension(value, minimum, maximum):
@@ -3367,8 +3305,6 @@ class ProfileManagerApp:
         scheme_var = tk.StringVar(value=(current_proxy["scheme"] or "http").upper())
         host_var = tk.StringVar(value=current_proxy["host"] or "")
         port_var = tk.StringVar(value="" if current_proxy["port"] is None else str(current_proxy["port"]))
-        username_var = tk.StringVar()
-        password_var = tk.StringVar()
 
         mode_frame = tk.Frame(dialog, bg="#f5f6fa")
         mode_frame.pack(fill=tk.X, padx=35)
@@ -3422,7 +3358,7 @@ class ProfileManagerApp:
 
         advanced_entries = []
         for row, (label, variable) in enumerate(
-            (("Host", host_var), ("Port", port_var), ("Username", username_var)), start=1
+            (("Host", host_var), ("Port", port_var)), start=1
         ):
             tk.Label(form, text=label, bg="#f5f6fa", anchor="w").grid(
                 row=row, column=0, sticky="w", padx=(0, 12), pady=4
@@ -3431,12 +3367,6 @@ class ProfileManagerApp:
             entry.grid(row=row, column=1, sticky="ew", pady=4)
             advanced_entries.append(entry)
 
-        tk.Label(form, text="Password", bg="#f5f6fa", anchor="w").grid(
-            row=4, column=0, sticky="w", padx=(0, 12), pady=4
-        )
-        password_entry = tk.Entry(form, textvariable=password_var, show="*", width=30)
-        password_entry.grid(row=4, column=1, sticky="ew", pady=4)
-        advanced_entries.append(password_entry)
         form.columnconfigure(1, weight=1)
 
         note_var = tk.StringVar()
@@ -3459,8 +3389,6 @@ class ProfileManagerApp:
             scheme_var.set(parsed["scheme"].upper())
             host_var.set(parsed["host"])
             port_var.set(str(parsed["port"]))
-            username_var.set(parsed["username"] or "")
-            password_var.set(parsed["password"] or "")
             # Do not retain a pasted credential-bearing string after parsing.
             proxy_string_var.set("")
             update_fields()
@@ -3473,14 +3401,8 @@ class ProfileManagerApp:
             parse_button.configure(state=widget_state)
             for entry in advanced_entries:
                 entry.configure(state=widget_state)
-            if username_var.get() or password_var.get():
-                note_var.set(
-                    "Authentication was parsed, but authenticated proxy launch and storage are not supported in M8. Remove the credentials before saving."
-                )
-            elif enabled:
-                note_var.set(
-                    "Paste host:port, host:port:user:pass, or scheme://host:port. IPv6 uses [host]:port."
-                )
+            if enabled:
+                note_var.set("Enter an unauthenticated proxy endpoint. IPv6 uses [address]:port.")
             else:
                 note_var.set("Proxy is off. Saved endpoint values will not be used for this profile.")
 
@@ -3488,10 +3410,6 @@ class ProfileManagerApp:
             enabled = mode_var.get().strip().casefold() == "enabled"
             try:
                 if enabled:
-                    if username_var.get() or password_var.get():
-                        raise ProxyValidationError(
-                            "Proxy authentication was parsed, but authenticated proxy launch and storage are not supported in M8. Remove username and password before saving."
-                        )
                     self.profile_manager.set_proxy(
                         profile_id,
                         True,

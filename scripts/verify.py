@@ -42,7 +42,8 @@ def _entrypoint_check():
     except (OSError, UnicodeError):
         return False
     return (
-        "from legacy.profile_manager import main" in source
+        "from revamped import product_main" in source
+        and '"--legacy"' in source
         and 'if __name__ == "__main__":' in source
         and "main()" in source
     )

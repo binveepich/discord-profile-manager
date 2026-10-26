@@ -54,32 +54,33 @@ class ExtensionTests(unittest.TestCase):
             self.manager.AUTOFILL_EXTENSION_NAME: self.manager.EXT_DIR,
         })
 
-    def test_registry_discovers_required_and_future_extensions_deterministically(self):
+    def test_registry_discovers_optional_token_extractor_and_future_extension(self):
         self.make_source()
         self.make_manifest_extension(
             self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
             {"manifest_version": 3, "background": {"service_worker": "background.js"}},
-            {"background.js": "self.addEventListener('install', () => {});"},
+            {"background.js": "const SOURCE = true;"},
         )
         self.make_manifest_extension("future-extension", {"manifest_version": 3})
-        (self.extensions / "not-an-extension").mkdir(parents=True)
+        (self.extensions / "invalid-extension").mkdir(parents=True)
         profiles = self.make_profiles()
 
         discovered = self.manager.ExtensionManager(profiles).discover_sources()
 
+        expected = {
+            self.manager.AUTOFILL_EXTENSION_NAME,
+            self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
+            "future-extension",
+        }
+        self.assertEqual(set(discovered), expected)
         self.assertEqual(
             list(discovered),
-            ["discord-autofill-extension", "future-extension"],
+            sorted(expected, key=lambda name: (name.casefold(), name)),
         )
-        self.assertEqual(
-            set(discovered),
-            {
-                self.manager.AUTOFILL_EXTENSION_NAME,
-                "future-extension",
-            },
-        )
+        self.assertNotIn(self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
+                         self.manager.PROHIBITED_EXTENSION_NAMES)
 
-    def test_required_deployment_is_multi_extension_and_profile_local(self):
+    def test_required_deployment_is_autofill_only_and_profile_local(self):
         self.make_source()
         self.make_manifest_extension(
             self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
@@ -124,6 +125,57 @@ class ExtensionTests(unittest.TestCase):
             {
                 path.relative_to(self.extensions): path.read_bytes()
                 for path in self.extensions.rglob("*") if path.is_file()
+            },
+        )
+
+    def test_optional_token_extractor_can_be_deployed_deliberately(self):
+        self.make_source()
+        self.make_manifest_extension(
+            self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
+            {"manifest_version": 3, "background": {"service_worker": "background.js"}},
+            {"background.js": "const SOURCE = true;"},
+        )
+        profiles = self.make_profiles()
+        profile_id = profiles.create_profile("Optional extension")
+        extensions = self.manager.ExtensionManager(profiles)
+
+        deployed = extensions.ensure_profile_extension(
+            profile_id, self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME
+        )
+
+        self.assertTrue(deployed.is_dir())
+        self.assertIn(
+            self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
+            extensions.discover_sources(),
+        )
+
+    def test_existing_optional_deployment_survives_required_setup_unchanged(self):
+        self.make_source()
+        self.make_manifest_extension(
+            self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME,
+            {"manifest_version": 3, "background": {"service_worker": "background.js"}},
+            {"background.js": "const SOURCE = true;"},
+        )
+        profiles = self.make_profiles()
+        profile_id = profiles.create_profile("Existing extension")
+        extensions = self.manager.ExtensionManager(profiles)
+        deployed = extensions.ensure_profile_extension(
+            profile_id, self.manager.TOKEN_EXTRACTOR_EXTENSION_NAME
+        )
+        before = {
+            path.relative_to(deployed): path.read_bytes()
+            for path in deployed.rglob("*") if path.is_file()
+        }
+
+        required = extensions.ensure_required_extensions(profile_id)
+
+        self.assertEqual([path.name for path in required], [self.manager.AUTOFILL_EXTENSION_NAME])
+        self.assertTrue(deployed.is_dir())
+        self.assertEqual(
+            before,
+            {
+                path.relative_to(deployed): path.read_bytes()
+                for path in deployed.rglob("*") if path.is_file()
             },
         )
 
