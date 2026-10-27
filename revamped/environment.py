@@ -15,7 +15,10 @@ import os
 from pathlib import Path
 import re
 import sys
+import threading
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from .chromium_version import DEFAULT_BROWSER_EXE, PINNED_VERSION
 
 
 DEFAULT_ENVIRONMENT_PRESET = "default"
@@ -84,12 +87,6 @@ MOBILE_ENVIRONMENT_DEFAULTS = {
     "mobile_mode": True,
     "touch_mode": True,
 }
-
-# Bundled runtime version recorded by the product audit.  Keeping this value in
-# one place prevents generated identities from advertising the old R10
-# Chromium 131 build while the application ships Chromium 152.
-_CHROMIUM_VERSION = "152.0.7977.82"
-CHROMIUM_VERSION = _CHROMIUM_VERSION
 
 # The React/pywebview product candidate has a deliberately separate launch
 # policy.  The legacy/refactor compatibility path below still retains its
@@ -225,29 +222,18 @@ WINDOWS_TIMEZONE_TO_IANA = {
     "Samoa Standard Time": "Pacific/Apia",
     "Line Islands Standard Time": "Pacific/Kiritimati",
 }
-WINDOWS_CHROMIUM_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    f"Chrome/{_CHROMIUM_VERSION} Safari/537.36"
-)
-LINUX_CHROMIUM_USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    f"Chrome/{_CHROMIUM_VERSION} Safari/537.36"
-)
-ANDROID_CHROMIUM_USER_AGENT = (
-    "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    f"Chrome/{_CHROMIUM_VERSION} Mobile Safari/537.36"
-)
 
 
 def user_agent_for_family(family, version=None):
-    """Return a runtime-compatible ordinary UA for one supported family."""
+    """Return a runtime-compatible ordinary UA for one supported family.
+
+    The version defaults to the installed browser, so the advertised UA follows
+    a browser update. It falls back to the pinned version when nothing is installed.
+    """
     family = _normalize_generated_family(family) if "_normalize_generated_family" in globals() else family
-    safe_version = str(version or CHROMIUM_VERSION).strip()
+    safe_version = str(version or current_chromium_version()).strip()
     if not re.fullmatch(r"\d+(?:\.\d+){1,3}", safe_version):
-        safe_version = CHROMIUM_VERSION
+        safe_version = current_chromium_version()
     if family == ENVIRONMENT_LINUX_CHROMIUM:
         return (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -267,7 +253,6 @@ PRESET_ENVIRONMENT_DEFAULTS = {
     ENVIRONMENT_WINDOWS_CHROMIUM: {
         **DESKTOP_WINDOW_DEFAULTS,
         "window_size_policy": WINDOW_SIZE_POLICY_DESKTOP,
-        "user_agent": WINDOWS_CHROMIUM_USER_AGENT,
         "language": "en-US",
         "device_scale_factor": 1.0,
         "mobile_mode": False,
@@ -276,7 +261,6 @@ PRESET_ENVIRONMENT_DEFAULTS = {
     ENVIRONMENT_LINUX_CHROMIUM: {
         **DESKTOP_WINDOW_DEFAULTS,
         "window_size_policy": WINDOW_SIZE_POLICY_DESKTOP,
-        "user_agent": LINUX_CHROMIUM_USER_AGENT,
         "language": "en-US",
         "device_scale_factor": 1.0,
         "mobile_mode": False,
@@ -287,13 +271,21 @@ PRESET_ENVIRONMENT_DEFAULTS = {
         # a desktop. Do not substitute the legacy 390 x 844 mobile window.
         **DESKTOP_WINDOW_DEFAULTS,
         "window_size_policy": WINDOW_SIZE_POLICY_DESKTOP,
-        "user_agent": ANDROID_CHROMIUM_USER_AGENT,
         "language": "en-US",
         "device_scale_factor": 2.75,
         "mobile_mode": True,
         "touch_mode": True,
     },
 }
+
+
+def preset_environment_defaults(preset):
+    """Copy a preset's static defaults and add the user agent for the installed browser."""
+    defaults = dict(PRESET_ENVIRONMENT_DEFAULTS[preset])
+    defaults["user_agent"] = user_agent_for_family(preset)
+    return defaults
+
+
 GENERATED_FAMILIES = (
     ENVIRONMENT_WINDOWS_CHROMIUM,
     ENVIRONMENT_LINUX_CHROMIUM,
@@ -964,7 +956,7 @@ def generate_product_environment(profile_id, preset=ENVIRONMENT_WINDOWS_CHROMIUM
             profile_id, target, revision, locale_name, timezone_name, seed
         ),
         "window_slot": int(seed[-1], 16) % 2,
-        "user_agent": user_agent_for_family(target, CHROMIUM_VERSION),
+        "user_agent": user_agent_for_family(target),
         "language": locale_name,
         "language_order": language_order,
         "mobile_mode": mobile,
@@ -1005,7 +997,7 @@ def product_custom_environment(
         if key in supplied:
             base[key] = supplied[key]
     if not base.get("user_agent"):
-        base["user_agent"] = user_agent_for_family(ENVIRONMENT_WINDOWS_CHROMIUM, CHROMIUM_VERSION)
+        base["user_agent"] = user_agent_for_family(ENVIRONMENT_WINDOWS_CHROMIUM)
     if not base.get("language"):
         settings = dict(system_settings or windows_system_environment())
         base["language"] = normalize_locale(settings.get("locale")) or _system_locale_fallback()
@@ -1059,7 +1051,7 @@ def deterministic_generated_environment(profile_id, generation=0, previous_famil
         family = GENERATED_FAMILIES[
             (GENERATED_FAMILIES.index(family) + 1) % len(GENERATED_FAMILIES)
         ]
-    result = dict(PRESET_ENVIRONMENT_DEFAULTS[family])
+    result = preset_environment_defaults(family)
     result.update({
         "generated_family": family,
         "generated_revision": safe_generation,
@@ -1132,7 +1124,7 @@ def materialize_environment_config(
         )
 
     # New fixed identities always retain a coherent UA, DPR, and touch family.
-    result = dict(PRESET_ENVIRONMENT_DEFAULTS[normalized_preset])
+    result = preset_environment_defaults(normalized_preset)
     for key in ("window_size_policy", "viewport_width", "viewport_height", "timezone"):
         if key in normalized_config:
             result[key] = normalized_config[key]
@@ -1185,7 +1177,7 @@ def effective_environment(record):
             config = deterministic_generated_environment("legacy-generated", 0)
         return preset, _resolve_window_policy(config, WINDOW_SIZE_POLICY_DESKTOP)
 
-    defaults = dict(PRESET_ENVIRONMENT_DEFAULTS[preset])
+    defaults = preset_environment_defaults(preset)
     custom = normalize_environment_config(raw_config)
     if custom:
         # Fixed presets permit an independent visible-window policy and stored
@@ -1368,7 +1360,7 @@ def product_environment_details(record, *, work_area=None, position=None):
         "window_slot": bounds["slot"],
         "window_geometry": bounds,
         "field_sources": field_sources,
-        "runtime_version": CHROMIUM_VERSION,
+        "runtime_version": current_chromium_version(),
         "timezone_applied": False,
         "unsupported_mobile_emulation": bool(config.get("mobile_mode", False)),
     }
@@ -1464,6 +1456,38 @@ def chromium_file_version(browser_path):
         return version_text if re.fullmatch(r"\d+(?:\.\d+){3}", version_text) else None
     except (AttributeError, OSError, ValueError):
         return None
+
+
+_INSTALLED_VERSION_CACHE = {}
+_INSTALLED_VERSION_LOCK = threading.Lock()
+
+
+def installed_version(browser_exe=None):
+    """Version of the installed browser, read without launching it. None when it is missing.
+
+    The result is cached by file size and modification time, so a browser update
+    is noticed on the next call.
+    """
+    path = Path(browser_exe or DEFAULT_BROWSER_EXE)
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    signature = (stat.st_mtime_ns, stat.st_size)
+    key = str(path)
+    with _INSTALLED_VERSION_LOCK:
+        cached = _INSTALLED_VERSION_CACHE.get(key)
+        if cached and cached[0] == signature:
+            return cached[1]
+    version = chromium_file_version(path)
+    with _INSTALLED_VERSION_LOCK:
+        _INSTALLED_VERSION_CACHE[key] = (signature, version)
+    return version
+
+
+def current_chromium_version(browser_exe=None):
+    """The version that user agents and runtime labels advertise: the installed build, else the pin."""
+    return installed_version(browser_exe) or PINNED_VERSION
 
 
 ENVIRONMENT_RUNTIME_GUIDANCE = (

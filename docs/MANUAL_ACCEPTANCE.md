@@ -319,6 +319,12 @@ Notes:
 
 Use a disposable script-only copy. Do not rename or remove the real `browser/`.
 
+1. Turn off "Tự động tải và kiểm tra Chromium" in Settings → Trình duyệt. Confirm that opening a profile without `browser/chrome.exe` reports the missing runtime and the manual-placement message.
+2. Turn it back on, then remove `browser/` from the disposable copy only. Confirm the splash shows the automatic download notice, the progress bar moves in Settings → Trình duyệt, and `browser/chrome.exe` appears when it finishes. This check needs network access and downloads about 200 MB.
+3. With the network off, press "Kiểm tra cập nhật". Confirm a readable message appears and the app keeps working.
+4. When GitHub has a newer build, press the update button. Confirm the progress reaches the end, the Settings card shows the new version, and the "Quay về" button shows the previous version. This check needs network access and downloads about 200 MB.
+5. Press "Quay về". Confirm the previous version is back and the Settings card shows it. Confirm nothing in `profiles/`, `config/`, `extensions/`, or `logs/` changed.
+
 Record:
 
 ```text

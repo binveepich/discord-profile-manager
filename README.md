@@ -15,7 +15,7 @@ Dự án vẫn đang ở giai đoạn beta. Các kiểm tra tự động đã đ
 - **Node.js 18 trở lên** (nên dùng bản LTS) để build giao diện React. Đã kiểm thử với Node.js 24.
 - **Git** để tải mã nguồn bằng lệnh `git clone`. Nếu không dùng Git, bạn có thể tải ZIP từ trang GitHub của dự án.
 - **Microsoft Edge WebView2 Runtime**: cửa sổ giao diện của pywebview dùng thành phần này. Windows 10 và 11 thường đã có sẵn. Nếu cửa sổ không mở, hãy cài thêm runtime này từ trang của Microsoft.
-- **Trình duyệt Ungoogled Chromium** (bản Windows, đủ toàn bộ các file của runtime). Bạn đặt vào thư mục `browser\`. Ứng dụng không tự cài hay cập nhật trình duyệt.
+- **Trình duyệt Ungoogled Chromium** (bản Windows). Ứng dụng tự tải bản đã ghim vào thư mục `browser\` khi mở lần đầu (cần mạng). Khi cập nhật, ứng dụng giữ một bản trước để quay lại, nên cần thêm khoảng 400–500 MB đĩa. Bạn cũng có thể tự đặt trình duyệt vào đó, xem bước 4.
 
 ## 🛠️ Cài đặt lần đầu
 
@@ -51,9 +51,9 @@ cd ..
 
 Sau bước này, thư mục `frontend\dist\` sẽ được tạo ra.
 
-**Bước 4: Đặt trình duyệt**
+**Bước 4: Trình duyệt Chromium**
 
-Tạo thư mục `browser` trong thư mục dự án (nếu chưa có), rồi đặt toàn bộ file của Ungoogled Chromium vào đó, sao cho có file `browser\chrome.exe`:
+Thường bạn không cần làm gì ở bước này: lần mở đầu tiên, ứng dụng tự tải Ungoogled Chromium vào thư mục `browser` (cần mạng, khoảng 200 MB). Nếu không có mạng, hoặc muốn tự quản lý trình duyệt, hãy tắt **Tự động tải và kiểm tra Chromium** trong **Cài đặt → Trình duyệt**, rồi đặt toàn bộ file của Ungoogled Chromium vào thư mục `browser`, sao cho có file `browser\chrome.exe`:
 
 ```powershell
 mkdir browser
@@ -98,7 +98,7 @@ Mật khẩu và mã TOTP (nếu bạn nhập) được lưu trên máy này, tr
 - **`node` hoặc `npm` không được nhận dạng.** Cài Node.js 18 trở lên, rồi mở lại PowerShell.
 - **"The React frontend is not built yet".** Chạy lại bước 3 (build giao diện).
 - **"pywebview is not installed".** Chạy lại `python -m pip install -r requirements.txt` trong thư mục dự án.
-- **"Chromium browser runtime not found".** Kiểm tra file `browser\chrome.exe` có nằm đúng đường dẫn mà thông báo đã in ra không.
+- **"Chromium browser runtime not found".** Mở **Cài đặt → Trình duyệt** và bấm **Tải Chromium**. Nếu vẫn lỗi, kiểm tra file `browser\chrome.exe` có nằm đúng đường dẫn mà thông báo đã in ra không.
 - **Git báo "dubious ownership"** (thường gặp khi thư mục được sao chép từ một tài khoản Windows khác). Chạy lệnh sau, thay đường dẫn bằng đường dẫn thật của thư mục dự án và dùng dấu `/`:
 
 ```powershell
@@ -117,6 +117,7 @@ python -B scripts/verify.py
 
 Bộ kiểm thử tự động đã được gỡ khỏi dự án ở bước beta 16, nên các kiểm tra thủ công trong [docs/MANUAL_ACCEPTANCE.md](docs/MANUAL_ACCEPTANCE.md) là bắt buộc.
 
+- Quản lý Chromium bằng dòng lệnh: `python -B -m revamped.browser_runtime status` (chỉ đọc, không cần mạng). Các lệnh `check`, `install` và `update` cần mạng; `rollback` quay về bản trước và không cần mạng.
 - Trạng thái dự án và các milestone: [REFACTOR_STATUS.md](REFACTOR_STATUS.md)
 - Kiểm tra thủ công trước khi phát hành (tiếng Anh): [docs/MANUAL_ACCEPTANCE.md](docs/MANUAL_ACCEPTANCE.md)
 - Thông tin về sản phẩm, sao lưu và snapshot (tiếng Anh): [docs/PRODUCT_CANDIDATE.md](docs/PRODUCT_CANDIDATE.md)

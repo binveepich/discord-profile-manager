@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Accessibility, Check, CircleAlert, Cpu, Eye, LoaderCircle, Puzzle, Save, X } from "lucide-react";
+import { Accessibility, Check, CircleAlert, Cpu, Download, Eye, LoaderCircle, Puzzle, RefreshCw, RotateCcw, Save, X } from "lucide-react";
 import { call } from "../api/bridge";
 import { userError } from "../i18n";
 import useDialogMotion from "../useDialogMotion";
@@ -10,11 +10,20 @@ const COLUMN_OPTIONS = [
   ["last_opened", "Mở gần đây", "Hiển thị lần sử dụng gần nhất"],
 ];
 
+const BROWSER_STAGE_LABELS = {
+  queued: "Đang chờ",
+  downloading: "Đang tải Chromium",
+  extracting: "Đang giải nén",
+  installing: "Đang đặt vào browser/",
+};
+
 export default function SettingsPage({ preferences, onPreferenceChange, notify, onClose }) {
   const [runtime, setRuntime] = useState(null);
   const [extensions, setExtensions] = useState(null);
   const [loading, setLoading] = useState(true);
   const [savingExtension, setSavingExtension] = useState("");
+  const [browser, setBrowser] = useState(null);
+  const [browserBusy, setBrowserBusy] = useState(false);
   const { closeDialog, dialogRef, backdropClassName, dialogClassName } = useDialogMotion(onClose);
 
   useEffect(() => {
@@ -28,8 +37,28 @@ export default function SettingsPage({ preferences, onPreferenceChange, notify, 
       })
       .catch((error) => { if (active) notify(userError(error), "error"); })
       .finally(() => { if (active) setLoading(false); });
+    call("get_browser_runtime").then((next) => { if (active) setBrowser(next); }).catch(() => {});
     return () => { active = false; };
   }, [notify]);
+
+  const browserJobActive = Boolean(browser?.job?.active);
+  useEffect(() => {
+    if (!browserJobActive) return undefined;
+    let active = true;
+    const timer = window.setInterval(() => {
+      call("get_browser_runtime")
+        .then((next) => {
+          if (!active) return;
+          setBrowser(next);
+          if (!next.job?.active) {
+            if (next.job?.status === "completed") notify("Chromium đã sẵn sàng.");
+            call("get_runtime_info").then((nextRuntime) => { if (active) setRuntime(nextRuntime); }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }, 1500);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [browserJobActive, notify]);
 
   const toggleColumn = (name) => {
     const current = new Set(preferences.visible_columns);
@@ -44,6 +73,32 @@ export default function SettingsPage({ preferences, onPreferenceChange, notify, 
       notify(enabled ? "Đã bật tiện ích tùy chọn." : "Đã tắt tiện ích tùy chọn.");
     } catch (error) { notify(userError(error), "error"); }
     finally { setSavingExtension(""); }
+  };
+
+  const startBrowserJob = async (method) => {
+    setBrowserBusy(true);
+    try {
+      await call(method);
+      setBrowser(await call("get_browser_runtime"));
+    } catch (error) { notify(userError(error), "error"); }
+    finally { setBrowserBusy(false); }
+  };
+
+  const checkBrowserUpdate = async () => {
+    setBrowserBusy(true);
+    try { setBrowser(await call("check_browser_runtime_update")); }
+    catch (error) { notify(userError(error), "error"); }
+    finally { setBrowserBusy(false); }
+  };
+
+  const toggleAutoDownload = async (enabled) => {
+    try { setBrowser(await call("set_browser_runtime_auto_download", enabled)); }
+    catch (error) { notify(userError(error), "error"); }
+  };
+
+  const cancelBrowserJob = async () => {
+    try { await call("cancel_browser_runtime"); }
+    catch (error) { notify(userError(error), "error"); }
   };
 
   const closeFromBackdrop = (event) => {
@@ -89,6 +144,28 @@ export default function SettingsPage({ preferences, onPreferenceChange, notify, 
               {loading ? <div className="loading-line"><LoaderCircle className="spin-once h-4 w-4" /> Đang kiểm tra runtime…</div> : runtime ? (
                 <div className="runtime-summary"><InfoRow label="Runtime" value={runtime.runtime_name} /><InfoRow label="Phiên bản" value={runtime.browser_version} /><div className={runtime.browser_available ? "runtime-ready" : "runtime-warning"}>{runtime.browser_available ? <Check className="h-4 w-4" /> : <CircleAlert className="h-4 w-4" />}{runtime.browser_available ? "Sẵn sàng sử dụng" : "Chưa tìm thấy browser/chrome.exe"}</div></div>
               ) : <p className="muted">Không thể đọc thông tin runtime.</p>}
+              {browser && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+                  <Toggle checked={browser.auto_download} onChange={toggleAutoDownload} label="Tự động tải và kiểm tra Chromium" description="Tải Chromium khi còn thiếu và kiểm tra bản cập nhật khi mở ứng dụng. Tắt đi nếu bạn tự quản lý trình duyệt." />
+                  {browser.job?.active ? (
+                    <div className="progress-box">
+                      <div className="progress-label"><span>{BROWSER_STAGE_LABELS[browser.job.progress?.stage] || "Đang xử lý"}</span><span>{browserProgressText(browser.job.progress)}</span></div>
+                      <div className="progress-track"><div className="progress-value" style={{ transform: `scaleX(${browserFraction(browser.job.progress)})` }} /></div>
+                      <button className="secondary-button" type="button" onClick={cancelBrowserJob}>Hủy</button>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {!browser.installed && <button className="primary-button" type="button" disabled={browserBusy} onClick={() => startBrowserJob("install_browser_runtime")}><Download className="h-4 w-4" /> Tải Chromium {browser.pinned_tag}</button>}
+                      {browser.installed && browser.last_check?.update_available && <button className="primary-button" type="button" disabled={browserBusy} onClick={() => startBrowserJob("update_browser_runtime")}><Download className="h-4 w-4" /> Cập nhật lên {browser.last_check.update_target_tag}</button>}
+                      {browser.installed && browser.previous?.present && <button className="secondary-button" type="button" disabled={browserBusy} onClick={() => startBrowserJob("rollback_browser_runtime")}><RotateCcw className="h-4 w-4" /> {browser.previous.version ? `Quay về ${browser.previous.version}` : "Quay về bản trước"}</button>}
+                      <button className="secondary-button" type="button" disabled={browserBusy} onClick={checkBrowserUpdate}><RefreshCw className="h-4 w-4" /> Kiểm tra cập nhật</button>
+                    </div>
+                  )}
+                  {browser.installed && <p className="helper-copy">Ứng dụng chỉ kiểm tra và báo khi có bản mới; bạn bấm để cài. Khi cập nhật, bản cũ được giữ lại để quay về, tốn thêm khoảng 400–500 MB đĩa.</p>}
+                  {browser.last_check?.error && <p className="helper-copy">{browser.last_check.error}</p>}
+                  {browser.job?.status === "failed" && <div className="warning-box"><CircleAlert className="h-4 w-4" /><span>{browser.job.error}</span></div>}
+                </div>
+              )}
             </div>
           </section>
 
@@ -112,3 +189,11 @@ function Toggle({ checked, onChange, label, description, disabled = false }) {
 }
 
 function InfoRow({ label, value }) { return <div className="info-row"><span>{label}</span><strong>{value || "Không rõ"}</strong></div>; }
+
+function browserFraction(progress) {
+  return progress?.total ? Math.min(1, (progress.completed || 0) / progress.total) : 0;
+}
+
+function browserProgressText(progress) {
+  return progress?.total ? `${Math.round(browserFraction(progress) * 100)}%` : "";
+}

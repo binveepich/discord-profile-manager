@@ -30,6 +30,7 @@ from urllib.request import (
 
 from . import environment, proxy
 from .accounts import derive_profile_name, parse_account_input
+from .browser_runtime import BrowserRuntimeService
 from .core import ProfileManagerError
 from .profiles import MAX_DISPLAYED_PROFILES, table_order
 
@@ -353,6 +354,8 @@ class ProductAPI:
         self.process_inspector = process_inspector
         self.diagnostics = diagnostics or ProxyDiagnostics()
         self.jobs = jobs or JobManager()
+        paths = getattr(profile_service, "paths", None)
+        self.browser_runtime = BrowserRuntimeService(paths, jobs=self.jobs) if paths is not None else None
 
     def _records(self):
         records = self.profile_service.get_profile_metadata()
@@ -935,6 +938,9 @@ class ProductAPI:
         return self.delete_profiles([profile_id], confirmed=confirmed)
 
     def launch_profile(self, profile_id):
+        runtime = self.browser_runtime
+        if runtime is not None and runtime.active_job() and not runtime.installed()["present"]:
+            raise ProfileManagerError("Chromium đang được tải tự động. Đợi tải xong rồi mở hồ sơ.")
         started = self.launcher.launch_discord(profile_id)
         return {"profile": self.get_profile(profile_id), "started": bool(started), "already_running": not started}
 
@@ -996,6 +1002,35 @@ class ProductAPI:
     def get_job(self, job_id):
         return self.jobs.get(job_id)
 
+    def _browser_runtime_service(self):
+        if self.browser_runtime is None:
+            raise ProfileManagerError("Không khởi tạo được trình quản lý Chromium trong phiên này.")
+        return self.browser_runtime
+
+    def get_browser_runtime(self):
+        """Installed build, pinned build, last update check, and the current background job."""
+        return self._browser_runtime_service().status()
+
+    def check_browser_runtime_update(self):
+        service = self._browser_runtime_service()
+        service.check_for_update()
+        return service.status()
+
+    def install_browser_runtime(self):
+        return self._browser_runtime_service().start_install()
+
+    def update_browser_runtime(self):
+        return self._browser_runtime_service().start_update()
+
+    def rollback_browser_runtime(self):
+        return self._browser_runtime_service().start_rollback()
+
+    def cancel_browser_runtime(self):
+        return self._browser_runtime_service().cancel()
+
+    def set_browser_runtime_auto_download(self, enabled):
+        return self._browser_runtime_service().set_auto_download(bool(enabled))
+
     @staticmethod
     def _safe_import_message(error, raw_line=None):
         """Keep account values out of import progress and line errors."""
@@ -1045,7 +1080,7 @@ class ProductAPI:
             "extension_sources": extension_sources,
             "system_settings": system_settings,
             "work_area": work_area,
-            "runtime_version": environment.CHROMIUM_VERSION,
+            "runtime_version": environment.current_chromium_version(),
         }
         initial_progress = {
             "completed": 0,
@@ -1354,17 +1389,17 @@ class ProductAPI:
         # Reading the Windows version resource is side-effect free.  In
         # particular, runtime information must never execute chrome.exe just
         # because the manager refreshed or opened an editor.
+        # The detected build is authoritative: a browser update can change the major version.
         detected_version = environment.chromium_file_version(browser_path)
-        if detected_version and not detected_version.startswith(environment.CHROMIUM_VERSION.split(".", 1)[0]):
-            detected_version = None
         return {
             "browser_available": browser_path.is_file(),
-            "browser_version": detected_version or environment.CHROMIUM_VERSION,
+            "browser_version": detected_version or environment.PINNED_VERSION,
             "version_source": "detected" if detected_version else "expected bundled runtime",
             "detection_method": "Windows version resource; no browser launch",
             "runtime_name": "Ungoogled Chromium",
             "browser_path_label": "browser/chrome.exe",
             "discord_url": "https://discord.com/app",
+            "browser_download_active": bool(self.browser_runtime and self.browser_runtime.active_job()),
         }
 
     def get_extension_policy(self):

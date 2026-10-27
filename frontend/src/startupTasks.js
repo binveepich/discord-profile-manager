@@ -64,9 +64,12 @@ export function createStartupPlan({ invoke = call, awaitBridge = waitForBridge }
         timeoutMs: SIDE_TIMEOUT_MS,
         failure: "Không kiểm tra được trình duyệt Chromium.",
         run: () => invoke("get_runtime_info"),
-        advisory: (runtime) => (runtime?.browser_available
-          ? null
-          : "Chưa tìm thấy browser/chrome.exe nên chưa thể mở hồ sơ. Bạn vẫn có thể quản lý danh sách."),
+        advisory: (runtime) => {
+          if (runtime?.browser_available) return null;
+          return runtime?.browser_download_active
+            ? "Đang tải Chromium tự động, có thể mất vài phút. Bạn vẫn có thể quản lý danh sách."
+            : "Chưa tìm thấy browser/chrome.exe nên chưa thể mở hồ sơ. Bạn vẫn có thể quản lý danh sách.";
+        },
       },
       {
         id: "about",

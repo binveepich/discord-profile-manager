@@ -54,6 +54,10 @@ def main(argv=None):
             "pywebview is not installed. Install requirements.txt, then run this command again."
         ) from error
 
+    # Start the Chromium first install or update check in the background; the window never waits for it.
+    if api.browser_runtime is not None:
+        api.browser_runtime.start_on_startup()
+
     window = None
     constraints_lock = threading.Lock()
     closing_started = threading.Event()
