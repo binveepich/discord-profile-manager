@@ -109,11 +109,13 @@ git config --global --add safe.directory "C:/duong/dan/den/discord-profile-manag
 
 ## 🧑‍💻 Dành cho nhà phát triển
 
-- Chạy kiểm thử tự động (dùng dữ liệu giả trong thư mục `tmp\`):
+- Kiểm tra cấu trúc mã nguồn (không mở trình duyệt hay cửa sổ):
 
 ```powershell
-python -B -m unittest discover -s tests -v
+python -B scripts/verify.py
 ```
+
+Bộ kiểm thử tự động đã được gỡ khỏi dự án ở bước beta 16, nên các kiểm tra thủ công trong [docs/MANUAL_ACCEPTANCE.md](docs/MANUAL_ACCEPTANCE.md) là bắt buộc.
 
 - Trạng thái dự án và các milestone: [REFACTOR_STATUS.md](REFACTOR_STATUS.md)
 - Kiểm tra thủ công trước khi phát hành (tiếng Anh): [docs/MANUAL_ACCEPTANCE.md](docs/MANUAL_ACCEPTANCE.md)

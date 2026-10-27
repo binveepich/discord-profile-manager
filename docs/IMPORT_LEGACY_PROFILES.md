@@ -9,7 +9,6 @@ proxy passwords. Passwords and TOTP secrets stay inside the copied `config.js`, 
 already were in the legacy profile.
 
 Script: `scripts\import_legacy_profiles.py`
-Tests: `tests\test_import_legacy_profiles.py` (synthetic installs only)
 
 In this guide:
 

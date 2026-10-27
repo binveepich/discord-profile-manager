@@ -144,7 +144,7 @@ Before a major implementation:
 3. Explain internally what must change.
 4. Make the smallest reasonable implementation.
 5. Run syntax/static checks.
-6. Run available tests.
+6. Run `python -B scripts/verify.py`.
 7. Inspect errors.
 8. Fix regressions caused by the change.
 

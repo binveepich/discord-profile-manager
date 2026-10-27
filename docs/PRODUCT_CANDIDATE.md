@@ -23,7 +23,7 @@ directly. The legacy app remains available with `python -B main.py --legacy`.
 
 The candidate uses this checkout's `profiles/`, `config/`, `extensions/`, and
 `logs/` directories. It never copies or scans live browser profile contents for
-export. Automated tests use disposable roots.
+export.
 
 ## Accounts and Autofill
 

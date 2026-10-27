@@ -4,7 +4,7 @@
 
 Use this checklist before approving packaging.
 
-Passing automated tests is required, but it does not prove the visible GUI and real browser behavior are manually approved.
+Passing the automated structural checks is required, but it does not prove the visible GUI and real browser behavior are manually approved.
 
 ## Safety rules
 
@@ -16,7 +16,7 @@ Do not delete or modify real working profiles while testing.
 
 Close disposable Chromium windows before deletion tests.
 
-## 1. Automated unit tests
+## 1. Automated structural checks
 
 Run:
 
@@ -24,45 +24,22 @@ Run:
 python -B scripts/verify.py
 ```
 
-If `scripts/verify.py` does not exist yet, run:
-
-```powershell
-python -B -m unittest discover -s tests -v
-```
-
 Record result:
 
 ```text
-Automated unit tests:
+Automated structural checks:
 PASS / FAIL
 Notes:
 ```
 
-These tests use disposable synthetic data and do not prove visible GUI behavior
+These checks read source files and file presence only. They do not run the app,
+open a window, or start Chromium, so they do not prove visible GUI behavior
 or real Discord behavior.
 
-## 2. Optional real Chromium smoke test
-
-Run only if you want diagnostic browser-runtime evidence:
-
-```powershell
-python -B tests/browser_smoke_m2.py
-```
-
-This smoke test is not the same as a visible GUI/manual Discord check. If it fails with GPU/cache/runtime environment errors, report it separately.
-
-Record result:
-
-```text
-Real Chromium smoke:
-PASS / FAIL / SKIPPED
-Notes:
-```
-
-## 3. Manual GUI checks
+## 2. Manual GUI checks
 
 The sections below require a visible manager and browser. Record a result only
-after performing the check yourself; unit tests and the smoke test are not GUI
+after performing the check yourself; automated checks are not GUI
 evidence.
 
 ### Startup
@@ -350,9 +327,9 @@ PASS / FAIL / SKIPPED
 Notes:
 ```
 
-## 4. Real Discord behavior (separate, optional)
+## 3. Real Discord behavior (separate, optional)
 
-Automated tests, the local smoke fixture, and GUI checks do not verify Discord
+Automated checks and GUI checks do not verify Discord
 login, autofill, or TOTP behavior. If this is tested manually, use only a
 dedicated non-production test account that the user has explicitly approved;
 never use production credentials. A safe minimum is:
@@ -373,7 +350,7 @@ Notes:
 
 This document does not claim that GUI or Discord behavior has been verified.
 
-## 5. Final manual decision
+## 4. Final manual decision
 
 ```text
 Source app approved for packaging?

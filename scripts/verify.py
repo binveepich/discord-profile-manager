@@ -5,8 +5,6 @@ print profile data, application metadata, account configuration, or logs.
 """
 
 from pathlib import Path
-import subprocess
-import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +16,6 @@ def _python_files():
     paths = [
         ENTRYPOINT,
         PROJECT_ROOT / "legacy" / "profile_manager.py",
-        *sorted((PROJECT_ROOT / "tests").glob("*.py")),
         Path(__file__).resolve(),
     ]
     return [path for path in paths if path.is_file()]
@@ -54,24 +51,9 @@ def _runtime_structure_check():
     return BROWSER_EXE.is_file()
 
 
-def _unit_test_check():
-    try:
-        result = subprocess.run(
-            [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-v"],
-            cwd=PROJECT_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except OSError:
-        return False
-    return result.returncode == 0
-
-
 def main():
     results = {
         "SYNTAX": _syntax_check(),
-        "UNIT TESTS": _unit_test_check(),
         "ENTRYPOINT": _entrypoint_check(),
         "RUNTIME STRUCTURE": _runtime_structure_check(),
     }

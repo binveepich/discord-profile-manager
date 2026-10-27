@@ -1,7 +1,7 @@
 # Parallel Refactor Rules
 
-1. `legacy/profile_manager.py` and the existing M1–M8 tests are frozen golden
-   reference files. Never edit, reformat, redirect, or rename them.
+1. `legacy/profile_manager.py` is a frozen golden reference file. Never edit,
+   reformat, redirect, or rename it. The M1–M8 tests were removed in beta step 16.
    Superseded for `main.py` by the owner's beta decision (recorded 2026-10-25, beta
    prep step 8): `main.py` now starts the React product, and `python main.py --legacy`
    runs the legacy app. Any change to its routing needs an explicit owner decision,

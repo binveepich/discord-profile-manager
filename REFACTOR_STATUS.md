@@ -42,12 +42,9 @@ The stable entrypoint is `main.py`, which starts the React product;
 - Baseline commit: `ca9c5661fb9cedc2ecaf884c58547a8672bfcf71` (R0 freeze)
 - Baseline branch: `main`
 - Working branch: `refactor/revamped-parallel`
-- `python -B scripts/verify.py`: PASS
-- `python -B -m unittest discover -s tests -p "test_*.py"`: PASS, 422 tests, 1 skipped (measured 2026-10-26)
-- `python -B -m unittest discover -s tests -p "test_m*.py"`: PASS, 182 tests
-- `python -B -m unittest discover -s tests -p "test_r*.py"`: PASS, 135 tests, 1 skipped
-- `python -B -m unittest discover -s tests -p "test_*parity.py"`: PASS, 4 tests
-- `npm test` in `frontend/` (node --test): PASS, 64 tests; `npx vite build` in `frontend/`: PASS
+- `python -B scripts/verify.py`: PASS (structural checks only)
+- Automated test suite removed in beta step 16 (owner-approved option B). Last measured before removal (2026-10-26): 422 Python tests PASS (1 skipped) and 64 frontend tests PASS
+- `npx vite build` in `frontend/`: PASS (last measured before beta step 16)
 - `python -B scripts/verify_revamped.py`: PASS, including protected runtime/source and prohibited-extension safety
 - `python -B scripts/check_refactor_integrity.py`: PASS, immutable R0 plus named approved milestones
 - `python -B scripts/compare_legacy_revamped.py`: PASS

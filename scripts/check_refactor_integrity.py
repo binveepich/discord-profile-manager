@@ -19,14 +19,7 @@ R0_BASELINE_COMMIT = "ca9c5661fb9cedc2ecaf884c58547a8672bfcf71"
 IMMUTABLE_BASELINE = {
     "legacy/profile_manager.py": "238e180952835fd87f893ca18df00ca73f6d5c67",
     "main.py": "1dd57b45b1c4bfbb574818816e1f3251001d56e0",
-    "tests/test_m1_runtime.py": "00bc5d212a33ac9947f4ddfc5418bb331ed4d540",
-    "tests/test_m2_lifecycle.py": "847f333b6520b44d45a4263ee36411dd6f5a7d9f",
-    "tests/test_m3_migration.py": "60a8831eac1bbef47f780c4c1e1ce4ac0cae697b",
-    "tests/test_m4_metadata.py": "738a92e04689760b2383ec2f7856d680170d2ec9",
-    "tests/test_m5_extensions.py": "944be25e6c3f3c9d771a4644f30e3e6ffe85a2b9",
-    "tests/test_m6_gui.py": "1ba6f5f1e9c5fec23044222325bb6d88368503c4",
-    "tests/test_m7_environment.py": "f44b0fa59adb00501d6633a3c9939b3858d7c76d",
-    "tests/test_m8_proxy.py": "68b98fa6112c130f4efb747c045f2a1b8e3ac151",
+    # The M1-M8 test files were removed in beta step 16 (owner-approved option B).
 }
 
 # R10-R12 were completed in HEAD, but their legacy compatibility changes were
@@ -35,11 +28,9 @@ IMMUTABLE_BASELINE = {
 APPROVED_MILESTONE_HASHES = {
     "R10-R12 compatibility": {
         "legacy/profile_manager.py": "22a733b9741a6a59ddfa5ff24c5003b1ebf06276",
-        "tests/test_m5_extensions.py": "387c767e5ab212b264bc31d1745d64186930e64b",
     },
     "R14 extension security remediation": {
         "legacy/profile_manager.py": "1cb18a41b2b43543af95b66bc80c3b2e9a8892ee",
-        "tests/test_m5_extensions.py": "6a590d135847d044e2e9b36133b7095cd1b23660",
     },
     # Owner-approved beta routing: main.py starts the React product and keeps
     # the legacy app behind --legacy. The R0 blob above is unchanged.
@@ -48,11 +39,9 @@ APPROVED_MILESTONE_HASHES = {
     },
     # Owner-approved beta step 2.5: the legacy proxy and environment dialogs are
     # repaired, and proxy editing is limited to endpoint fields. The legacy
-    # module and the two tests changed with it are recorded after the repair.
+    # module changed with it and is recorded after the repair.
     "Beta step 2.5 legacy proxy endpoint repair": {
         "legacy/profile_manager.py": "c3aca7a7cfc2b6432032fdc05146cdcf2a1f7dce",
-        "tests/test_m5_extensions.py": "4360be9d05227d894f1e3da5873a1b11550c23a3",
-        "tests/test_m8_proxy.py": "bfa6cf7bcef37d39f68d343e788dd6d0a0816b1e",
     },
 }
 
