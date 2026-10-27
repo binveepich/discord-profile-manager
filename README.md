@@ -6,7 +6,7 @@ Chào bạn! 👋 Đây là hướng dẫn cài đặt lần đầu, viết cho 
 
 Trình quản lý đa tài khoản Discord giúp bạn tạo nhiều **hồ sơ trình duyệt** tách biệt. Mỗi hồ sơ có cookie, phiên đăng nhập và dữ liệu lưu trữ riêng, và được mở trong một cửa sổ Chromium riêng. Dự án hiện chạy từ mã nguồn; chưa có bản đóng gói `.exe`.
 
-Dự án vẫn đang ở giai đoạn beta. Các kiểm tra tự động đã đạt, nhưng việc mở giao diện và chạy trình duyệt thật cần bạn tự kiểm tra trên máy của mình.
+Dự án vẫn đang ở giai đoạn beta. Hiện chưa có bộ kiểm thử tự động, nên việc mở giao diện và chạy trình duyệt thật cần bạn tự kiểm tra trên máy của mình.
 
 ## 🧩 Yêu cầu trước khi cài
 
@@ -15,7 +15,7 @@ Dự án vẫn đang ở giai đoạn beta. Các kiểm tra tự động đã đ
 - **Node.js 18 trở lên** (nên dùng bản LTS) để build giao diện React. Đã kiểm thử với Node.js 24.
 - **Git** để tải mã nguồn bằng lệnh `git clone`. Nếu không dùng Git, bạn có thể tải ZIP từ trang GitHub của dự án.
 - **Microsoft Edge WebView2 Runtime**: cửa sổ giao diện của pywebview dùng thành phần này. Windows 10 và 11 thường đã có sẵn. Nếu cửa sổ không mở, hãy cài thêm runtime này từ trang của Microsoft.
-- **Trình duyệt Ungoogled Chromium** (bản Windows). Ứng dụng tự tải bản đã ghim vào thư mục `browser\` khi mở lần đầu (cần mạng). Khi cập nhật, ứng dụng giữ một bản trước để quay lại, nên cần thêm khoảng 400–500 MB đĩa. Bạn cũng có thể tự đặt trình duyệt vào đó, xem bước 4.
+- **Trình duyệt Ungoogled Chromium**: không cần tải tay. Nếu chưa có Chromium, lần chạy đầu tiên ứng dụng tự tải khoảng **197 MB**, nên **cần kết nối Internet** lúc đó. Mỗi bản Chromium chiếm khoảng 400–500 MB đĩa. Chi tiết xem mục **🌐 Trình duyệt (tự động tải)** bên dưới.
 
 ## 🛠️ Cài đặt lần đầu
 
@@ -51,13 +51,19 @@ cd ..
 
 Sau bước này, thư mục `frontend\dist\` sẽ được tạo ra.
 
-**Bước 4: Trình duyệt Chromium**
-
-Thường bạn không cần làm gì ở bước này: lần mở đầu tiên, ứng dụng tự tải Ungoogled Chromium vào thư mục `browser` (cần mạng, khoảng 200 MB). Nếu không có mạng, hoặc muốn tự quản lý trình duyệt, hãy tắt **Tự động tải và kiểm tra Chromium** trong **Cài đặt → Trình duyệt**, rồi đặt toàn bộ file của Ungoogled Chromium vào thư mục `browser`, sao cho có file `browser\chrome.exe`:
+**Bước 4: Chạy ứng dụng lần đầu**
 
 ```powershell
-mkdir browser
+python main.py
 ```
+
+Nếu thư mục `browser\` chưa có Chromium, lần chạy đầu tiên ứng dụng sẽ tự tải **Ungoogled Chromium** vào đó. Bạn không cần tự tìm hay giải nén trình duyệt.
+
+- Lần này cần **kết nối Internet**, gói tải khoảng **197 MB**.
+- Có thể mất vài phút, tùy tốc độ mạng. Khi đang tải, ứng dụng hiện thông báo lúc mở, và bạn xem được thanh tiến trình trong **Cài đặt → Trình duyệt**.
+- Cửa sổ quản lý vẫn mở ngay, nhưng bạn cần đợi tải xong rồi mới mở được hồ sơ.
+
+Nếu máy bạn không có mạng, hoặc bạn muốn tự quản lý trình duyệt, xem mục **🧰 Nếu cần tự cài trình duyệt** bên dưới.
 
 ## ▶️ Chạy ứng dụng
 
@@ -75,9 +81,51 @@ Nếu bạn cần dùng bản cũ (giao diện Tkinter):
 python main.py --legacy
 ```
 
-Bản cũ chỉ chạy được từ mã nguồn đầy đủ. Bản phát hành không đi kèm thư mục `legacy\`.
+Bản cũ chỉ chạy được từ mã nguồn đầy đủ. Bản phát hành không đi kèm thư mục `legacy\`. Bản cũ không tự tải trình duyệt, nên cần có sẵn `browser\chrome.exe` (xem mục **🧰 Nếu cần tự cài trình duyệt**).
 
 Nếu `python main.py` dừng lại và hiện thông báo tiếng Anh "The React frontend is not built yet", nghĩa là bạn chưa làm bước 3. Hãy build giao diện theo bước 3, rồi chạy lại. Trong lúc chờ, bạn có thể dùng `python main.py --legacy`.
+
+## 🌐 Trình duyệt (tự động tải)
+
+Ứng dụng tự tải và quản lý **Ungoogled Chromium** trong thư mục `browser\`. Trong trường hợp bình thường, bạn không cần cài hay cập nhật trình duyệt bằng tay.
+
+- **Cài lần đầu:** ứng dụng cài bản đã kiểm thử, **152.0.7977.82**.
+- **Kiểm tra bản mới:** nếu bật tự động (mặc định), mỗi lần mở ứng dụng và có mạng, ứng dụng hỏi GitHub xem có bản Chromium mới hơn không. Bạn cũng có thể bấm **Kiểm tra cập nhật** bất cứ lúc nào.
+- **Cập nhật:** vào **Cài đặt → Trình duyệt** và bấm **Cập nhật lên ...** khi nút này hiện ra. Ứng dụng chỉ báo khi có bản mới, và chỉ cài khi bạn bấm. Trước khi cập nhật, hãy đóng mọi cửa sổ Chromium đang mở.
+- **Quay về:** khi có bản trước, bấm **Quay về ...** để trở lại bản đó.
+- **Dung lượng:** mỗi bản khoảng **400–500 MB**. Sau khi cập nhật, ứng dụng giữ **một** bản cũ để quay về, nên tổng cộng có thể khoảng **800–1000 MB**. Bản cũ hơn nữa sẽ bị xóa ở lần cập nhật sau.
+- Cập nhật hoặc quay về **không** thay đổi hồ sơ, cấu hình, tiện ích và nhật ký của bạn (`profiles\`, `config\`, `extensions\`, `logs\`).
+
+## 🧰 Nếu cần tự cài trình duyệt (dự phòng)
+
+Bình thường bạn không cần làm việc này. Hãy dùng mục này nếu máy bạn không có Internet, hoặc bạn đã tắt tự động tải.
+
+**1. Tải đúng gói.** Mở [trang Releases của ungoogled-software/ungoogled-chromium-windows](https://github.com/ungoogled-software/ungoogled-chromium-windows/releases), rồi vào bản [152.0.7977.82-1.1](https://github.com/ungoogled-software/ungoogled-chromium-windows/releases/tag/152.0.7977.82-1.1). Tải file **`ungoogled-chromium_152.0.7977.82-1.1_windows_x64.zip`** (Windows x64, dạng `.zip`).
+
+**2. Giải nén vào `browser\`.** Trong thư mục dự án, tạo thư mục `browser` nếu chưa có:
+
+```powershell
+mkdir browser
+```
+
+Giải nén file zip, rồi đưa toàn bộ file vào `browser\`, sao cho có file `browser\chrome.exe`. Nếu trong zip có một thư mục bọc bên ngoài, hãy đưa các file bên trong thư mục đó ra `browser\`, không để thêm một lớp thư mục.
+
+**3. Tắt tự động tải (nếu bạn muốn).** Mở **Cài đặt → Trình duyệt** và tắt công tắc **Tự động tải và kiểm tra Chromium**. Công tắc này được lưu trong file `config\browser_runtime.json` (`"auto_download": false`). Bạn cũng có thể tắt bằng lệnh:
+
+```powershell
+python -m revamped.browser_runtime auto-download off
+```
+
+Khi tắt, ứng dụng không tự tải và không tự kiểm tra bản mới khi mở. Bạn vẫn bấm được các nút trong **Cài đặt → Trình duyệt** khi cần.
+
+**Các lệnh khác** (chạy trong thư mục dự án):
+
+- `python -m revamped.browser_runtime status`: xem bản đang cài và bản trước. Không cần mạng.
+- `python -m revamped.browser_runtime install`: tải bản đã ghim khi chưa có `browser\chrome.exe`. Cần mạng.
+- `python -m revamped.browser_runtime check`: hỏi GitHub xem có bản mới không. Cần mạng.
+- `python -m revamped.browser_runtime update`: cập nhật lên bản mới nhất. Cần mạng.
+- `python -m revamped.browser_runtime rollback`: quay về bản trước. Không cần mạng.
+- `python -m revamped.browser_runtime auto-download on`: bật lại tự động tải và kiểm tra.
 
 ## 💾 Dữ liệu của bạn
 
@@ -98,7 +146,7 @@ Mật khẩu và mã TOTP (nếu bạn nhập) được lưu trên máy này, tr
 - **`node` hoặc `npm` không được nhận dạng.** Cài Node.js 18 trở lên, rồi mở lại PowerShell.
 - **"The React frontend is not built yet".** Chạy lại bước 3 (build giao diện).
 - **"pywebview is not installed".** Chạy lại `python -m pip install -r requirements.txt` trong thư mục dự án.
-- **"Chromium browser runtime not found".** Mở **Cài đặt → Trình duyệt** và bấm **Tải Chromium**. Nếu vẫn lỗi, kiểm tra file `browser\chrome.exe` có nằm đúng đường dẫn mà thông báo đã in ra không.
+- **"Chromium browser runtime not found"** (hoặc "Chưa tìm thấy browser/chrome.exe"). Thường ứng dụng tự tải Chromium khi mở lần đầu. Nếu không tải được, thường vì mất mạng, không vào được GitHub, hoặc hết dung lượng đĩa, hãy kiểm tra mạng và dung lượng, rồi mở **Cài đặt → Trình duyệt** và bấm **Tải Chromium**. Nếu vẫn không được, làm theo mục **🧰 Nếu cần tự cài trình duyệt**.
 - **Git báo "dubious ownership"** (thường gặp khi thư mục được sao chép từ một tài khoản Windows khác). Chạy lệnh sau, thay đường dẫn bằng đường dẫn thật của thư mục dự án và dùng dấu `/`:
 
 ```powershell
