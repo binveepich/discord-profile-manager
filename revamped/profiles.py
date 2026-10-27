@@ -38,13 +38,15 @@ from .processes import ChromiumProcessInspector
 
 PROFILE_EXTENSION_DIR_NAME = "Unpacked Extensions"
 MAX_DISPLAYED_PROFILES = 9_999
+# Owner-approved one-time baseline when STT was first stored: this profile goes last.
+BASELINE_LAST_PROFILE_ID = "profile_0047"
 _TYPED_NUMBER_NAME = re.compile(r"\s*([0-9]+)\s*\|")
 _DEFAULT_PROFILE_NAME = re.compile(r"\s*Profile\s+(\d+)\s*")
 _PROFILE_ID_NUMBER = re.compile(r"(\d+)$")
 
 
 def profile_display_sort_key(display_name, profile_id):
-    """Return the (group, number) sort key of a profile in table order; lower sorts first.
+    """Return the old name-rule (group, number) key; lower sorts first. Used only to freeze the first stored STT.
 
     Group 0: a typed STT-style prefix such as "0001 | name", ordered by that number.
     Group 1: plain account names, in catalog order.
@@ -64,19 +66,69 @@ def profile_display_sort_key(display_name, profile_id):
     return 1, 0
 
 
-def table_order(records):
-    """Return (STT, record) pairs in table order, the only place STT is assigned.
+def _usable_stt(value):
+    """Return a stored STT that can be used as a position, or None."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
 
-    The list is sorted first and then numbered: STT is the 1-based position in the sorted list. A number typed
-    into a name only feeds the sort key, so it is never used as STT. Equal keys keep catalog order.
-    """
-    ordered = sorted(
+
+def _name_order(records):
+    """Return records in the old name-based order. Used only to freeze the first stored STT."""
+    return sorted(
         records,
         key=lambda record: profile_display_sort_key(
             record.get("display_name") or record["profile_id"], record["profile_id"]
         ),
     )
+
+
+def table_order(records):
+    """Return (STT, record) pairs in table order, sorted by the stored STT and never by display name.
+
+    Records sort by stored STT, then by profile_id. A record with no usable STT sorts after the numbered
+    rows. The STT shown is the 1-based position, which equals the stored value once the catalog is 1..N.
+    """
+    ordered = sorted(
+        records,
+        key=lambda record: (
+            _usable_stt(record.get("stt")) is None,
+            _usable_stt(record.get("stt")) or 0,
+            record["profile_id"],
+        ),
+    )
     return list(enumerate(ordered, 1))
+
+
+def next_stt(records):
+    """Return the STT for a new record: one past the highest stored STT."""
+    return max((_usable_stt(record.get("stt")) or 0 for record in records), default=0) + 1
+
+
+def compact_stt(records):
+    """Renumber records 1..N in their current table order, so a delete leaves no gap."""
+    for position, record in table_order(records):
+        record["stt"] = position
+
+
+def assign_missing_stt(records):
+    """Give each record without a usable STT one, in place. Runs at the startup schema point.
+
+    With no STT stored yet, this is the one-time baseline: the old name-based order, with the approved profile
+    moved to the end. Otherwise only unnumbered records are touched, and they are appended after the highest STT.
+    """
+    if not any(_usable_stt(record.get("stt")) for record in records):
+        ordered = sorted(
+            _name_order(records), key=lambda record: record["profile_id"] == BASELINE_LAST_PROFILE_ID
+        )
+        for position, record in enumerate(ordered, 1):
+            record["stt"] = position
+        return
+    number = next_stt(records)
+    for record in records:
+        if _usable_stt(record.get("stt")) is None:
+            record["stt"] = number
+            number += 1
 
 
 class _NullLogger:
@@ -370,6 +422,8 @@ class ProfileService:
             # status/list reads must not touch the legacy registry.
             self._reconcile_legacy_profiles(catalog)
             self._reconcile_managed_profiles(catalog)
+            # Stored STT is written once per record; this only numbers records that have none yet.
+            assign_missing_stt(catalog["profiles"])
             if not self.legacy_store.path.exists():
                 # Preserve the legacy compatibility contract, but keep this
                 # migration write at the controlled startup boundary.
@@ -841,7 +895,9 @@ class ProfileService:
             new_id = self.next_profile_id(self._record_map(catalog))
             self._initialize_profile_structure(new_id)
             profile_dir = self._resolve_profile_dir(new_id)
-            catalog["profiles"].append(self._record(new_id, display_name.strip() if display_name is not None else new_id, profile_dir))
+            new_record = self._record(new_id, display_name.strip() if display_name is not None else new_id, profile_dir)
+            new_record["stt"] = next_stt(catalog["profiles"])
+            catalog["profiles"].append(new_record)
             if self._batch_catalog is catalog:
                 self._batch_created_paths.add(profile_dir.absolute())
             try:
@@ -932,6 +988,7 @@ class ProfileService:
                 results.append(item)
 
             if changed:
+                compact_stt(catalog["profiles"])
                 self._save_catalog(catalog)
                 for profile_id, staged in pending:
                     if staged is None:
@@ -971,6 +1028,7 @@ class ProfileService:
             record = self._record_map(catalog).get(profile_id)
             if record is None:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found. Refresh the list.")
+            # STT is stored separately, so a rename changes the label and never the row's place.
             record["display_name"] = new_name.strip()
             self._touch(record)
             self._save_catalog(catalog)
@@ -995,6 +1053,7 @@ class ProfileService:
             else:
                 self._check_pending_delete(profile_id, profile_dir.parent)
             catalog["profiles"] = [item for item in catalog["profiles"] if item["profile_id"] != profile_id]
+            compact_stt(catalog["profiles"])
             try:
                 self._save_catalog(catalog)
             except Exception:
