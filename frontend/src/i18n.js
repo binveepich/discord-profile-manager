@@ -24,7 +24,19 @@ const SAFE_ERROR_PATTERNS = [
   [/proxy/i, "Không thể xử lý Proxy. Vui lòng kiểm tra địa chỉ và cổng."],
 ];
 
+const CHROMIUM_RUNNING_MESSAGE = "Chromium đang dùng thư mục dữ liệu dùng chung. Hãy đóng Chromium rồi thử lại.";
+
+// `action` completes the instruction: "lưu lại" after an edit, "xóa lại" after a delete.
+export function profileRunningMessage(profile, action = "lưu lại") {
+  const name = String(profile?.name || "").trim();
+  const label = name ? `Hồ sơ "${name}"` : "Hồ sơ";
+  const stt = profile?.stt ? ` (STT ${profile.stt})` : "";
+  return `${label}${stt} đang mở Chromium. Hãy đóng cửa sổ Chromium của hồ sơ này rồi ${action}.`;
+}
+
 export function userError(error, fallback = "Không thể hoàn tất thao tác. Vui lòng thử lại.") {
+  if (error?.code === "profile_running") return profileRunningMessage(error.profile);
+  if (error?.code === "chromium_running") return CHROMIUM_RUNNING_MESSAGE;
   const raw = String(error?.message || error || "").trim();
   if (!raw) return fallback;
   const match = SAFE_ERROR_PATTERNS.find(([pattern]) => pattern.test(raw));

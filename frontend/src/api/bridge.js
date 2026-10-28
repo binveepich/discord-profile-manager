@@ -27,6 +27,17 @@ export class BridgeMethodUnavailableError extends Error {
   }
 }
 
+// The backend returns an expected refusal, such as a profile whose Chromium is open, as {ok: false, error}.
+// Keep its code and profile so the UI can explain it. The message is unchanged, so other errors read as before.
+export class ProfileActionError extends Error {
+  constructor(failure) {
+    super(String(failure?.message || "The desktop backend refused the request."));
+    this.name = "ProfileActionError";
+    this.code = String(failure?.code || "error");
+    this.profile = failure?.profile || null;
+  }
+}
+
 if (typeof window !== "undefined") {
   window.addEventListener("pywebviewready", attach, { once: true });
   if (window.pywebview?.api) attach();
@@ -58,7 +69,9 @@ export async function call(method, ...args) {
   const api = nativeApi || window.pywebview?.api;
   if (!api) throw new BridgeNotReadyError();
   if (typeof api[method] !== "function") throw new BridgeMethodUnavailableError(method);
-  return api[method](...args);
+  const result = await api[method](...args);
+  if (result?.ok === false && result.error) throw new ProfileActionError(result.error);
+  return result;
 }
 
 export function onBridgeReady(callback) {

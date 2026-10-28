@@ -14,6 +14,7 @@ from . import environment, proxy
 from .core import (
     MANAGER_PATH_KEY,
     NEW_PROFILE_PATTERN,
+    ChromiumOpenError,
     ProfileManagerError,
     ProfileNotFoundError,
     checked_path,
@@ -787,7 +788,7 @@ class ProfileService:
             return
         for root, label in ((self.paths.data_dir, "data"), (self.paths.profiles_dir, "managed")):
             if self.process_inspector.using_directory(root, exact=True):
-                raise ProfileManagerError(f"Chromium is using the shared {label} data directory. Close it before using the manager.")
+                raise ChromiumOpenError(f"Chromium is using the shared {label} data directory. Close it before using the manager.")
         self._registry_idle_checked = True
 
     def get_profiles(self):
@@ -958,8 +959,9 @@ class ProfileService:
                         if callable(close_callback):
                             close_callback(profile_id)
                         if self.process_inspector.using_directory(profile_dir):
-                            raise ProfileManagerError(
-                                f"Close Chromium for {profile_id} before deleting it."
+                            raise ChromiumOpenError(
+                                f"Close Chromium for {profile_id} before deleting it.",
+                                profile_id=profile_id,
                             )
                     staged = None
                     if profile_dir.exists():
@@ -985,6 +987,7 @@ class ProfileService:
                     item["error"] = None
                 except Exception as error:
                     item["error"] = str(error)[:240] or error.__class__.__name__
+                    item["code"] = getattr(error, "code", "error")
                 results.append(item)
 
             if changed:
@@ -1043,7 +1046,7 @@ class ProfileService:
                 raise ProfileNotFoundError(f"Profile {profile_id} not found")
             profile_dir = self._resolve_profile_dir(profile_id, record)
             if self.process_inspector.using_directory(profile_dir):
-                raise ProfileManagerError(f"Close Chromium for {profile_id} before deleting it.")
+                raise ChromiumOpenError(f"Close Chromium for {profile_id} before deleting it.", profile_id=profile_id)
             pending = None
             if profile_dir.exists():
                 if not profile_dir.is_dir():
@@ -1093,7 +1096,7 @@ class ProfileService:
             if not source.is_dir():
                 raise ProfileManagerError(f"Legacy profile path is not a directory: {source}. No migration was performed.")
             if self.process_inspector.using_directory(source):
-                raise ProfileManagerError(f"Close Chromium for {profile_id} before migrating it.")
+                raise ChromiumOpenError(f"Close Chromium for {profile_id} before migrating it.", profile_id=profile_id)
             destination = None
             try:
                 ensure_tree_has_no_links(source)

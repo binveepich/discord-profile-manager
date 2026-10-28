@@ -8,6 +8,8 @@ Autofill workflow.
 
 import csv
 from datetime import datetime
+import functools
+import inspect
 import io
 import json
 import logging
@@ -31,7 +33,7 @@ from urllib.request import (
 from . import environment, proxy
 from .accounts import derive_profile_name, parse_account_input
 from .browser_runtime import BrowserRuntimeService
-from .core import ProfileManagerError
+from .core import PROFILE_OPEN_FOR_ACCOUNT_MESSAGE, ChromiumOpenError, ProfileManagerError
 from .profiles import MAX_DISPLAYED_PROFILES, table_order
 
 
@@ -98,6 +100,31 @@ def _json_safe(value, *, drop_sensitive=True):
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _bridge_refusals(method):
+    """Return an expected ProfileManagerError as data instead of raising it through pywebview.
+
+    pywebview logs a full traceback for every exception that escapes a bridge
+    method. A refusal such as "close Chromium first" is expected, so the bridge
+    gets ``{"ok": False, "error": {...}}`` and the frontend's ``call()`` turns it
+    back into an error. Other exceptions still propagate and keep their traceback.
+    Apply this only to bridge entry points; methods that other ProductAPI code
+    reads as data must keep raising.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except ProfileManagerError as error:
+            _LOGGER.info("%s refused (%s)", method.__name__, getattr(error, "code", "error"))
+            return {"ok": False, "error": self._refusal_payload(error)}
+
+    # pywebview builds its JavaScript stubs from this parameter list, and it
+    # reads the list with getfullargspec, which ignores functools.wraps.
+    wrapper.__signature__ = inspect.signature(method)
+    return wrapper
 
 
 class JobManager:
@@ -365,6 +392,29 @@ class ProductAPI:
             )
         return list(records)
 
+    def _profile_summary_map(self):
+        """Return {profile_id: {profile_id, name, stt}} in table order, for refusals that name a profile."""
+        return {
+            record["profile_id"]: {
+                "profile_id": record["profile_id"],
+                "name": record.get("display_name") or record["profile_id"],
+                "stt": f"{position:04d}",
+            }
+            for position, record in table_order(self._records())
+        }
+
+    def _refusal_payload(self, error):
+        payload = {"code": getattr(error, "code", "error"), "message": str(error)}
+        profile_id = getattr(error, "profile_id", None)
+        if profile_id:
+            try:
+                summary = self._profile_summary_map().get(profile_id)
+            except ProfileManagerError:
+                summary = None
+            if summary is not None:
+                payload["profile"] = summary
+        return payload
+
     def _status(self, profile_id, record=None):
         try:
             # Status polling already has the catalog record.  Reuse its
@@ -537,6 +587,7 @@ class ProductAPI:
             "created_at": record.get("created_at"),
         }
 
+    @_bridge_refusals
     def initialize_catalog(self):
         """Reconcile and publish the application catalog for the loading splash.
 
@@ -547,6 +598,7 @@ class ProductAPI:
         catalog = self.profile_service.initialize_metadata()
         return {"profiles": len(catalog["profiles"])}
 
+    @_bridge_refusals
     def report_startup_warning(self, task_id, message):
         """Log one non-critical startup failure that the splash reported."""
         if str(task_id) not in STARTUP_TASK_IDS:
@@ -555,6 +607,7 @@ class ProductAPI:
         _LOGGER.warning("Startup task %s reported a problem: %s", task_id, text)
         return {"logged": True}
 
+    @_bridge_refusals
     def list_profiles(self, search="", sort="stt", reverse=False, status=None):
         records = self._records()
         statuses = self._status_map(records)
@@ -597,6 +650,7 @@ class ProductAPI:
             rows.sort(key=keys.get(sort_key, keys["stt"]), reverse=bool(reverse))
         return _json_safe(rows)
 
+    @_bridge_refusals
     def display_order(self):
         """Return every profile's STT in table order, for the table to take after a change that moves rows."""
         records = self._records()
@@ -615,6 +669,7 @@ class ProductAPI:
                 ))
         raise ProfileManagerError("Profile was not found.")
 
+    @_bridge_refusals
     def refresh_status(self, profile_ids=None):
         """Return only local Chromium status fields for the lightweight poller."""
         records = self._records()
@@ -647,6 +702,12 @@ class ProductAPI:
                 record, index, statuses.get(profile_id, "Error")
             ))
         return _json_safe(rows)
+
+    def _require_profile_closed(self, profile_id):
+        """Refuse an account write while the profile's Chromium is open, before any other write runs."""
+        profile_dir = self.profile_service.require_profile_dir(profile_id)
+        if self.process_inspector and self.process_inspector.using_directory(profile_dir):
+            raise ChromiumOpenError(PROFILE_OPEN_FOR_ACCOUNT_MESSAGE, profile_id=profile_id)
 
     def _set_credential_account(
         self, profile_id, account_input, *, parsed_account=None,
@@ -822,6 +883,7 @@ class ProductAPI:
             raise
         return profile_id
 
+    @_bridge_refusals
     def create_profile(self, name=None, account_input=None, environment_payload=None, proxy_payload=None):
         parsed = parse_account_input(account_input) if account_input else None
         display_name = (name or (derive_profile_name(parsed["email"]) if parsed else "Profile")).strip()
@@ -838,6 +900,7 @@ class ProductAPI:
         )
         return self.get_profile(profile_id)
 
+    @_bridge_refusals
     def update_profile(self, profile_id, name=None, account_input=None, remove_account=False,
                        environment_payload=None, proxy_payload=None):
         parsed_account = (
@@ -851,6 +914,9 @@ class ProductAPI:
             environment.normalize_environment_preset(
                 request.get("preset", request.get("environment_preset", "Auto"))
             )
+        if remove_account or account_input is not None:
+            # Refused before the first write, so a refused save changes nothing, not even the name.
+            self._require_profile_closed(profile_id)
         if name is not None:
             self.profile_service.rename_profile(profile_id, name)
         if remove_account:
@@ -869,10 +935,12 @@ class ProductAPI:
             )
         return self.get_profile(profile_id)
 
+    @_bridge_refusals
     def rename_profile(self, profile_id, name):
         self.profile_service.rename_profile(profile_id, name)
         return self.get_profile(profile_id)
 
+    @_bridge_refusals
     def delete_profiles(self, profile_ids, confirmed=False):
         if not isinstance(profile_ids, (list, tuple, set)):
             profile_ids = [profile_ids]
@@ -887,6 +955,9 @@ class ProductAPI:
                 "errors": [],
                 "results": [],
             }
+
+        # Read names and STT before deleting, because deletion renumbers the rows that remain.
+        summaries = self._profile_summary_map()
 
         def request_close(profile_id):
             # The launcher owns handles for processes started by this manager.
@@ -918,11 +989,18 @@ class ProductAPI:
                 "deleted": sum(item["status"] == "deleted" for item in results),
                 "failed": sum(item["status"] != "deleted" for item in results),
             }
-        errors = [
-            {"profile_id": item["profile_id"], "error": item.get("error") or "Deletion failed."}
-            for item in result.get("results", [])
-            if item.get("status") != "deleted"
-        ]
+        errors = []
+        for item in result.get("results", []):
+            if item.get("status") == "deleted":
+                continue
+            failure = {
+                "profile_id": item["profile_id"],
+                "error": item.get("error") or "Deletion failed.",
+                "code": item.get("code", "error"),
+            }
+            if item["profile_id"] in summaries:
+                failure["profile"] = summaries[item["profile_id"]]
+            errors.append(failure)
         result.update({
             "requires_confirmation": False,
             "errors": errors,
@@ -934,9 +1012,11 @@ class ProductAPI:
         })
         return _json_safe(result)
 
+    @_bridge_refusals
     def delete_profile(self, profile_id, confirmed=False):
         return self.delete_profiles([profile_id], confirmed=confirmed)
 
+    @_bridge_refusals
     def launch_profile(self, profile_id):
         runtime = self.browser_runtime
         if runtime is not None and runtime.active_job() and not runtime.installed()["present"]:
@@ -944,6 +1024,7 @@ class ProductAPI:
         started = self.launcher.launch_discord(profile_id)
         return {"profile": self.get_profile(profile_id), "started": bool(started), "already_running": not started}
 
+    @_bridge_refusals
     def launch_batch(self, profile_ids, delay=0.0):
         if not isinstance(profile_ids, (list, tuple)) or not profile_ids:
             raise ProfileManagerError("Select at least one profile to launch.")
@@ -996,6 +1077,7 @@ class ProductAPI:
 
         return self.jobs.start("batch-launch", worker)
 
+    @_bridge_refusals
     def cancel_batch(self, job_id):
         return self.jobs.cancel(job_id)
 
@@ -1007,27 +1089,34 @@ class ProductAPI:
             raise ProfileManagerError("Không khởi tạo được trình quản lý Chromium trong phiên này.")
         return self.browser_runtime
 
+    @_bridge_refusals
     def get_browser_runtime(self):
         """Installed build, pinned build, last update check, and the current background job."""
         return self._browser_runtime_service().status()
 
+    @_bridge_refusals
     def check_browser_runtime_update(self):
         service = self._browser_runtime_service()
         service.check_for_update()
         return service.status()
 
+    @_bridge_refusals
     def install_browser_runtime(self):
         return self._browser_runtime_service().start_install()
 
+    @_bridge_refusals
     def update_browser_runtime(self):
         return self._browser_runtime_service().start_update()
 
+    @_bridge_refusals
     def rollback_browser_runtime(self):
         return self._browser_runtime_service().start_rollback()
 
+    @_bridge_refusals
     def cancel_browser_runtime(self):
         return self._browser_runtime_service().cancel()
 
+    @_bridge_refusals
     def set_browser_runtime_auto_download(self, enabled):
         return self._browser_runtime_service().set_auto_download(bool(enabled))
 
@@ -1252,6 +1341,7 @@ class ProductAPI:
     def _export_timestamp():
         return datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    @_bridge_refusals
     def export_json(self, profile_ids=None):
         rows = self._export_rows(profile_ids)
         content = json.dumps(rows, indent=2, ensure_ascii=False) + "\n"
@@ -1263,6 +1353,7 @@ class ProductAPI:
             "contains_sensitive_credentials": True,
         }
 
+    @_bridge_refusals
     def export_csv(self, profile_ids=None):
         output = io.StringIO(newline="")
         writer = csv.DictWriter(output, fieldnames=EXPORT_COLUMNS, extrasaction="ignore")
@@ -1277,6 +1368,7 @@ class ProductAPI:
             "contains_sensitive_credentials": True,
         }
 
+    @_bridge_refusals
     def export_txt(self, profile_ids=None):
         rows = self._export_rows(profile_ids)
 
@@ -1296,6 +1388,7 @@ class ProductAPI:
             "contains_sensitive_credentials": True,
         }
 
+    @_bridge_refusals
     def save_account_export(self, kind="json", profile_ids=None):
         """Show a native save dialog and write the selected complete records."""
         kind = str(kind or "json").casefold()
@@ -1341,18 +1434,21 @@ class ProductAPI:
             "contains_sensitive_credentials": True,
         }
 
+    @_bridge_refusals
     def parse_proxy(self, value):
         parsed = proxy.parse_proxy_string(value)
         return _json_safe({
             "scheme": parsed["scheme"], "host": parsed["host"], "port": parsed["port"],
         })
 
+    @_bridge_refusals
     def check_proxy(self, value, timeout=8):
         return self.jobs.start(
             "proxy-check",
             lambda cancel_event, progress: self.diagnostics.check(value, timeout=timeout),
         )
 
+    @_bridge_refusals
     def generate_environment(self, profile_id, preset="Desktop", custom=None):
         key = re.sub(r"[\s_/-]+", "-", str(preset or "Desktop").strip().casefold())
         if key == "auto":
@@ -1384,6 +1480,7 @@ class ProductAPI:
         result["generator_preset"] = label
         return result
 
+    @_bridge_refusals
     def get_runtime_info(self):
         browser_path = Path(self.profile_service.paths.browser_exe)
         # Reading the Windows version resource is side-effect free.  In
@@ -1402,6 +1499,7 @@ class ProductAPI:
             "browser_download_active": bool(self.browser_runtime and self.browser_runtime.active_job()),
         }
 
+    @_bridge_refusals
     def get_extension_policy(self):
         state = self.extension_service.get_registry_state()
         return _json_safe({
@@ -1419,6 +1517,7 @@ class ProductAPI:
             ],
         })
 
+    @_bridge_refusals
     def get_ui_preferences(self):
         """Read non-sensitive UI preferences from application-owned config."""
         path = self.profile_service.paths.ui_preferences_json
@@ -1448,6 +1547,7 @@ class ProductAPI:
         }
         return _json_safe(result)
 
+    @_bridge_refusals
     def save_ui_preferences(self, preferences):
         """Validate and atomically persist presentation-only preferences."""
         if not isinstance(preferences, dict):
@@ -1547,6 +1647,7 @@ class ProductAPI:
             "stack": ["Python", "pywebview", "React", "Vite", "Tailwind CSS"],
         })
 
+    @_bridge_refusals
     def open_developer_profile(self):
         """Open the configured developer profile in the system default browser."""
         url = self.get_about_info().get("developer_profile_url")
@@ -1554,10 +1655,12 @@ class ProductAPI:
             return {"opened": False, "configured": False}
         return {"opened": bool(webbrowser.open(url, new=2)), "configured": True}
 
+    @_bridge_refusals
     def open_contributor_github(self):
         """Compatibility alias for clients using the older About action."""
         return self.open_developer_profile()
 
+    @_bridge_refusals
     def set_optional_extension_policy(self, extension_name, enabled):
         if enabled is not True and enabled is not False:
             raise ProfileManagerError("Extension enablement must be true or false.")

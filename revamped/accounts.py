@@ -5,7 +5,13 @@ import os
 import re
 import uuid
 
-from .core import InvalidAccountFormatError, ProfileManagerError, checked_path
+from .core import (
+    PROFILE_OPEN_FOR_ACCOUNT_MESSAGE,
+    ChromiumOpenError,
+    InvalidAccountFormatError,
+    ProfileManagerError,
+    checked_path,
+)
 from .extensions import ExtensionService
 
 
@@ -336,9 +342,7 @@ class AccountCompatibilityService:
     def _enable_developer_mode(self, profile_id, *, check_running=True):
         profile_dir = self.profile_service.require_profile_dir(profile_id)
         if check_running and self._is_running(profile_dir):
-            raise ProfileManagerError(
-                "Close this profile's Chromium windows before configuring its account."
-            )
+            raise ChromiumOpenError(PROFILE_OPEN_FOR_ACCOUNT_MESSAGE, profile_id=profile_id)
         prefs_file = self.profile_service.get_browser_profile_dir(profile_id) / "Preferences"
         if not prefs_file.exists():
             self.logger.warning("Preferences not found for profile %s", profile_id)
@@ -430,9 +434,7 @@ class AccountCompatibilityService:
             totp_secret = totp_secret.upper()
         profile_dir = self.profile_service.require_profile_dir(profile_id)
         if self._is_running(profile_dir):
-            raise ProfileManagerError(
-                "Close this profile's Chromium windows before configuring its account."
-            )
+            raise ChromiumOpenError(PROFILE_OPEN_FOR_ACCOUNT_MESSAGE, profile_id=profile_id)
         original_config = self._read_local_account_config(profile_id)
         self._ensure_both_extensions_installed(profile_id)
         self._enable_developer_mode(profile_id, check_running=False)
@@ -495,9 +497,7 @@ const ACCOUNT = {{
             raise InvalidAccountFormatError("Account input could not be parsed.")
         profile_dir = self.profile_service.require_profile_dir(profile_id)
         if not skip_running_check and self._is_running(profile_dir):
-            raise ProfileManagerError(
-                "Close this profile's Chromium windows before configuring its account."
-            )
+            raise ChromiumOpenError(PROFILE_OPEN_FOR_ACCOUNT_MESSAGE, profile_id=profile_id)
 
         original_config = self._read_local_account_config(profile_id)
         if not extensions_ready:
@@ -592,9 +592,7 @@ const ACCOUNT = {{
         normalized = self._normalize_product_metadata(email_identifier, label)
         profile_dir = self.profile_service.require_profile_dir(profile_id)
         if self._is_running(profile_dir):
-            raise ProfileManagerError(
-                "Close this profile's Chromium windows before configuring its account."
-            )
+            raise ChromiumOpenError(PROFILE_OPEN_FOR_ACCOUNT_MESSAGE, profile_id=profile_id)
 
         # Stage the old local config first.  Clearing it before publication is
         # safe because a metadata failure restores the exact previous bytes.

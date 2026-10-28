@@ -14,7 +14,7 @@ import { applyProfileDeltaToRows, applyProfileOrder, deltaMovesRows } from "./pr
 import { launchBatchOutcome, launchPollFailureState } from "./jobOutcome";
 import { applyReduceMotionAttribute, mergeSavedPreferences, normalizePreferences, readLocalPreferences, readLocalReduceMotionExplicit, resolveReduceMotionPreference, writeLocalPreferences } from "./uiPreferences";
 import { createThemeTransition } from "./themeTransition";
-import { UI, formatCount, userError } from "./i18n";
+import { UI, formatCount, profileRunningMessage, userError } from "./i18n";
 
 const DEMO_ROWS = [{
   profile_id: "profile_0001", stt: "0001", name: "Ví dụ", account: "demo@example.invalid",
@@ -318,7 +318,9 @@ export default function App({ boot = null, covered = false, onMounted }) {
     try {
       const result = await call("delete_profiles", profileIds, true);
       const deletedIds = Array.isArray(result.deleted_profile_ids) ? result.deleted_profile_ids : (result.results || []).filter((item) => item.status === "deleted").map((item) => item.profile_id);
-      notify(`Đã xóa ${result.deleted || 0} hồ sơ${result.failed ? `; ${result.failed} hồ sơ thất bại` : ""}.`, result.failed ? "error" : "success");
+      const running = (result.errors || []).filter((item) => item.code === "profile_running");
+      const runningNote = running.length ? ` ${profileRunningMessage(running[0].profile, "xóa lại")}${running.length > 1 ? ` Còn ${running.length - 1} hồ sơ khác cũng đang mở.` : ""}` : "";
+      notify(`Đã xóa ${result.deleted || 0} hồ sơ${result.failed ? `; ${result.failed} hồ sơ thất bại` : ""}.${runningNote}`, result.failed ? "error" : "success");
       if (Number(result.deleted || 0) !== deletedIds.length || !applyProfileDelta([], deletedIds)) notify("Đã xóa nhưng bảng chưa thể cập nhật đầy đủ. Hãy bấm Làm mới.", "error");
     } catch (error) { notify(userError(error), "error"); } finally { setDeleteInFlight(false); }
   };

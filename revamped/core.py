@@ -39,6 +39,25 @@ class ProxyValidationError(ProfileManagerError):
     """A proxy value is outside the supported unauthenticated policy."""
 
 
+PROFILE_OPEN_FOR_ACCOUNT_MESSAGE = "Close this profile's Chromium windows before configuring its account."
+
+
+class ChromiumOpenError(ProfileManagerError):
+    """Chromium is open on data this change needs, so the change was refused before any write.
+
+    ``profile_id`` names the profile whose window is open. It is None when the
+    shared data root is in use instead.
+    """
+
+    def __init__(self, message, *, profile_id=None):
+        super().__init__(message)
+        self.profile_id = profile_id
+
+    @property
+    def code(self):
+        return "profile_running" if self.profile_id else "chromium_running"
+
+
 WORKSPACE_DEVELOPMENT = "development"
 WORKSPACE_PRODUCT = "product"
 PRODUCT_WORKSPACE_MARKER = ".discord-profile-manager-product-root"
